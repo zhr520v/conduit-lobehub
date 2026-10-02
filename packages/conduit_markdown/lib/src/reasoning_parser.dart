@@ -14,15 +14,20 @@ final _htmlUnescape = HtmlUnescape();
 /// Unescape HTML entities in reasoning content.
 String _unescapeHtml(String s) => _htmlUnescape.convert(s);
 
-/// All reasoning tag pairs supported by Open WebUI.
-/// Reference: DEFAULT_REASONING_TAGS in middleware.py
+/// All reasoning tag pairs supported by Open WebUI and LobeHub.
+/// Reference: DEFAULT_REASONING_TAGS in middleware.py and common reasoning models
 const List<(String, String)> defaultReasoningTagPairs = [
   ('<think>', '</think>'),
   ('<thinking>', '</thinking>'),
-  ('<reason>', '</reason>'),
-  ('<reasoning>', '</reasoning>'),
   ('<thought>', '</thought>'),
   ('<Thought>', '</Thought>'),
+  ('<reasoning>', '</reasoning>'),
+  ('<reason>', '</reason>'),
+  ('<antThinking>', '</antThinking>'),
+  ('<brainstorm>', '</brainstorm>'),
+  ('<reflection>', '</reflection>'),
+  ('<inner_monologue>', '</inner_monologue>'),
+  ('<justification>', '</justification>'),
   ('<|begin_of_thought|>', '<|end_of_thought|>'),
   ('◁think▷', '◁/think▷'),
 ];
@@ -51,6 +56,17 @@ class ReasoningEntry {
       blockType == CollapsibleBlockType.codeInterpreter;
 
   String get formattedDuration => ReasoningParser.formatDuration(duration);
+
+  /// Word or character count of the cleaned reasoning content.
+  int get wordCount => ReasoningParser.countWords(cleanedReasoning);
+
+  /// Formats the completion summary text, e.g. "Thought for 5s (128 words)" or "已深度思考 (128字)".
+  String formattedCompletedSummary({bool isChinese = false}) =>
+      ReasoningParser.formatCompletedSummary(
+        seconds: duration,
+        words: wordCount,
+        isChinese: isChinese,
+      );
 
   /// Gets the cleaned reasoning text (removes leading '>' from blockquote format).
   String get cleanedReasoning {
@@ -122,6 +138,9 @@ class ReasoningContent {
 
   String get formattedDuration => ReasoningParser.formatDuration(duration);
 
+  /// Word or character count of the cleaned reasoning content.
+  int get wordCount => ReasoningParser.countWords(cleanedReasoning);
+
   /// Gets the cleaned reasoning text (removes leading '>').
   String get cleanedReasoning {
     return reasoning
@@ -141,7 +160,7 @@ class ReasoningParser {
   /// Patterns that indicate a details block is reasoning content.
   /// Used when the `type` attribute is missing.
   static final _reasoningSummaryPattern = RegExp(
-    r'Thought|Thinking|Reasoning',
+    r'Thought|Thinking|Reasoning|AntThinking|Brainstorm|Reflection|Inner_monologue|Justification',
     caseSensitive: false,
   );
 
@@ -606,6 +625,65 @@ class ReasoningParser {
     if (seconds < 129600) return 'a day'; // 36 hours
     final days = (seconds / 86400).round();
     return '$days days';
+  }
+
+  /// Counts words or characters in [text].
+  ///
+  /// For CJK characters (Chinese, Japanese, Korean), each ideograph counts as
+  /// one word/character. For Western/Latin texts, words separated by whitespace
+  /// are counted.
+  static int countWords(String text) {
+    if (text.trim().isEmpty) return 0;
+    // CJK character ranges:
+    // \u4e00-\u9fff (CJK Unified Ideographs)
+    // \u3400-\u4dbf (CJK Unified Ideographs Extension A)
+    // \uf900-\ufaff (CJK Compatibility Ideographs)
+    final cjkRegex = RegExp(r'[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]');
+    final cjkMatches = cjkRegex.allMatches(text).length;
+
+    // Remove CJK characters and count remaining whitespace-separated words
+    final remaining = text.replaceAll(cjkRegex, ' ').trim();
+    if (remaining.isEmpty) {
+      return cjkMatches;
+    }
+    final latinWords = remaining
+        .split(RegExp(r'\s+'))
+        .where((s) => s.isNotEmpty)
+        .length;
+    return cjkMatches + latinWords;
+  }
+
+  /// Formats reasoning completion summary with optional duration and word count.
+  ///
+  /// Examples:
+  /// - Chinese: "已深度思考 5秒 (128字)" / "已深度思考 (128字)" / "已深度思考 5秒" / "已深度思考"
+  /// - English: "Thought for 5s (128 words)" / "Thought (128 words)" / "Thought for 5 seconds"
+  static String formatCompletedSummary({
+    int seconds = 0,
+    int words = 0,
+    bool isChinese = false,
+  }) {
+    if (isChinese) {
+      if (seconds > 0 && words > 0) {
+        return '已深度思考 ${seconds}秒 ($words字)';
+      } else if (words > 0) {
+        return '已深度思考 ($words字)';
+      } else if (seconds > 0) {
+        return '已深度思考 ${seconds}秒';
+      }
+      return '已深度思考';
+    }
+
+    if (seconds > 0 && words > 0) {
+      final wordLabel = words == 1 ? 'word' : 'words';
+      return 'Thought for ${seconds}s ($words $wordLabel)';
+    } else if (words > 0) {
+      final wordLabel = words == 1 ? 'word' : 'words';
+      return 'Thought ($words $wordLabel)';
+    } else if (seconds > 0) {
+      return 'Thought for ${formatDuration(seconds)}';
+    }
+    return 'Thoughts';
   }
 }
 

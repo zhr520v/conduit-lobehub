@@ -55,6 +55,8 @@ class _MarkdownDetailsBlockState extends State<MarkdownDetailsBlock> {
       _detailsData.kind == CompiledMarkdownDetailsKind.reasoning ||
       _detailsData.kind == CompiledMarkdownDetailsKind.codeInterpreter;
 
+  bool get _isLobeReasoning => _isReasoning && _detailsData.isLobeReasoning;
+
   bool get _isCodeInterpreter =>
       _detailsData.kind == CompiledMarkdownDetailsKind.codeInterpreter;
 
@@ -62,7 +64,8 @@ class _MarkdownDetailsBlockState extends State<MarkdownDetailsBlock> {
 
   bool get _supportsInlineExpansion => _detailsData.supportsInlineExpansion;
 
-  bool get _usesInlineExpansion => _supportsInlineExpansion && _isPending;
+  bool get _usesInlineExpansion =>
+      _supportsInlineExpansion && (_isPending || _isLobeReasoning);
 
   bool get _canExpand {
     if (!_isToolCall) {
@@ -92,6 +95,16 @@ class _MarkdownDetailsBlockState extends State<MarkdownDetailsBlock> {
   }
 
   @override
+  void initState() {
+    super.initState();
+    if (_isReasoning &&
+        _detailsData.isPending &&
+        (_detailsData.isOpen || _detailsData.isLobeReasoning)) {
+      _isInlineExpanded = true;
+    }
+  }
+
+  @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     _restoreInlineExpansionStateIfNeeded();
@@ -103,6 +116,13 @@ class _MarkdownDetailsBlockState extends State<MarkdownDetailsBlock> {
     if (oldWidget.inlineExpansionStateId != widget.inlineExpansionStateId) {
       _restoredInlineExpansionStateId = null;
       _restoreInlineExpansionStateIfNeeded();
+    }
+    if (oldWidget.detailsData.isPending && !_detailsData.isPending) {
+      // Completed state: auto-folding into compact capsule
+      if (_isLobeReasoning || _detailsData.isLobeReasoning) {
+        _isInlineExpanded = false;
+        _persistInlineExpansionState();
+      }
     }
     if (_isInlineExpanded && !_usesInlineExpansion) {
       _isInlineExpanded = false;
@@ -137,6 +157,16 @@ class _MarkdownDetailsBlockState extends State<MarkdownDetailsBlock> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: embeds,
             );
+    }
+
+    // Non-thinking models (when reasoning is empty/null):
+    // No empty placeholder or empty details widget rendered; content flows immediately.
+    if (_isReasoning && !_detailsData.hasBody && !_isPending) {
+      return const SizedBox.shrink();
+    }
+
+    if (_isLobeReasoning) {
+      return _buildLobeReasoningCapsuleWidget(context);
     }
 
     final title = _headerTitle(context);
@@ -223,6 +253,91 @@ class _MarkdownDetailsBlockState extends State<MarkdownDetailsBlock> {
         ),
         child: Padding(
           padding: const EdgeInsets.only(left: Spacing.sm),
+          child: body,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLobeReasoningCapsuleWidget(BuildContext context) {
+    final locale = Localizations.maybeLocaleOf(context);
+    final isChinese = locale?.languageCode == 'zh';
+    final inlineBody = _canExpand ? _buildBody(context) : null;
+
+    final String title;
+    if (_isPending) {
+      title = isChinese ? '正在深度思考…' : 'Deep thinking in progress…';
+    } else {
+      final words = ReasoningParser.countWords(_detailsData.bodyMarkdown);
+      final seconds = _detailsData.durationSeconds;
+      title = ReasoningParser.formatCompletedSummary(
+        seconds: seconds,
+        words: words,
+        isChinese: isChinese,
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: Spacing.xs),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          KeyedSubtree(
+            key: const ValueKey<String>('lobe-reasoning-capsule-header'),
+            child: _LobeReasoningPillHeader(
+              title: title,
+              isPending: _isPending,
+              isExpanded: _isInlineExpanded,
+              canExpand: _canExpand,
+              onTap: _canExpand ? () => _handleHeaderTap(context) : null,
+            ),
+          ),
+          ClipRect(
+            child: AnimatedSize(
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeInOutCubic,
+              alignment: Alignment.topCenter,
+              child: _isInlineExpanded && inlineBody != null
+                  ? KeyedSubtree(
+                      key: const ValueKey<String>('lobe-reasoning-body'),
+                      child: _buildLobeInlineBody(context, inlineBody),
+                    )
+                  : const SizedBox.shrink(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLobeInlineBody(BuildContext context, Widget body) {
+    final theme = context.conduitTheme;
+    return Padding(
+      padding: const EdgeInsets.only(top: Spacing.xs, left: Spacing.xs),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: theme.isDark
+              ? theme.textPrimary.withValues(alpha: 0.03)
+              : theme.textPrimary.withValues(alpha: 0.02),
+          border: Border(
+            left: BorderSide(
+              color: theme.dividerColor.withValues(alpha: 0.28),
+              width: 1.5,
+            ),
+          ),
+          borderRadius: const BorderRadius.only(
+            topRight: Radius.circular(AppBorderRadius.sm),
+            bottomRight: Radius.circular(AppBorderRadius.sm),
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            Spacing.sm,
+            Spacing.xs,
+            Spacing.sm,
+            Spacing.xs,
+          ),
           child: body,
         ),
       ),
@@ -748,4 +863,190 @@ ReasoningHeader resolveReasoningHeader(CompiledMarkdownDetailsData data) {
   }
 
   return const ReasoningHeaderThoughts();
+}
+
+/// A sleek, compact pill/capsule header for LobeHub reasoning blocks.
+class _LobeReasoningPillHeader extends StatefulWidget {
+  const _LobeReasoningPillHeader({
+    required this.title,
+    required this.isPending,
+    required this.isExpanded,
+    required this.canExpand,
+    this.onTap,
+  });
+
+  final String title;
+  final bool isPending;
+  final bool isExpanded;
+  final bool canExpand;
+  final VoidCallback? onTap;
+
+  @override
+  State<_LobeReasoningPillHeader> createState() =>
+      _LobeReasoningPillHeaderState();
+}
+
+class _LobeReasoningPillHeaderState extends State<_LobeReasoningPillHeader>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _shimmerController;
+  var _disableAnimations = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _shimmerController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1500),
+    );
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _disableAnimations =
+        MediaQuery.maybeDisableAnimationsOf(context) ??
+        WidgetsBinding
+            .instance
+            .platformDispatcher
+            .accessibilityFeatures
+            .disableAnimations;
+    _syncShimmerController();
+  }
+
+  @override
+  void didUpdateWidget(covariant _LobeReasoningPillHeader oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isPending != widget.isPending) {
+      _syncShimmerController();
+    }
+  }
+
+  @override
+  void dispose() {
+    _shimmerController.dispose();
+    super.dispose();
+  }
+
+  void _syncShimmerController() {
+    if (_shouldAnimateShimmer) {
+      if (!_shimmerController.isAnimating) {
+        _shimmerController.repeat();
+      }
+      return;
+    }
+    if (_shimmerController.isAnimating) {
+      _shimmerController.stop();
+    }
+  }
+
+  bool get _shouldAnimateShimmer => widget.isPending && !_disableAnimations;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = context.conduitTheme;
+    final content = Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(AppBorderRadius.pill),
+        onTap: widget.onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(
+            color: theme.isDark
+                ? theme.tokens.neutralTone30.withValues(alpha: 0.45)
+                : theme.tokens.neutralTone10.withValues(alpha: 0.6),
+            borderRadius: BorderRadius.circular(AppBorderRadius.pill),
+            border: Border.all(
+              color: theme.dividerColor.withValues(alpha: 0.2),
+              width: 0.8,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Icon(
+                widget.isPending
+                    ? Icons.auto_awesome_rounded
+                    : Icons.psychology_outlined,
+                size: 14,
+                color: widget.isPending
+                    ? theme.textPrimary.withValues(alpha: 0.8)
+                    : theme.textSecondary.withValues(alpha: 0.75),
+              ),
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(
+                  widget.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w500,
+                    color: widget.isPending
+                        ? theme.textPrimary.withValues(alpha: 0.85)
+                        : theme.textSecondary.withValues(alpha: 0.8),
+                    height: 1.2,
+                  ),
+                ),
+              ),
+              if (widget.canExpand) ...[
+                const SizedBox(width: 4),
+                AnimatedRotation(
+                  turns: widget.isExpanded ? 0 : -0.25,
+                  duration: const Duration(milliseconds: 180),
+                  curve: Curves.easeOutCubic,
+                  child: Icon(
+                    Icons.expand_more_rounded,
+                    size: 14,
+                    color: theme.textSecondary.withValues(alpha: 0.6),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (!_shouldAnimateShimmer) {
+      return content;
+    }
+
+    return Stack(
+      fit: StackFit.passthrough,
+      children: [
+        content,
+        Positioned.fill(
+          child: IgnorePointer(
+            child: ExcludeSemantics(
+              child: AnimatedBuilder(
+                animation: _shimmerController,
+                child: content,
+                builder: (context, child) {
+                  final value = _shimmerController.value;
+                  return ShaderMask(
+                    blendMode: BlendMode.srcATop,
+                    shaderCallback: (bounds) {
+                      return LinearGradient(
+                        begin: Alignment(-1.2 + value * 2.4, 0),
+                        end: Alignment(-0.2 + value * 2.4, 0),
+                        colors: [
+                          Colors.transparent,
+                          theme.shimmerHighlight.withValues(alpha: 0.5),
+                          Colors.transparent,
+                        ],
+                        stops: const [0.25, 0.5, 0.75],
+                      ).createShader(bounds);
+                    },
+                    child: child,
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 }

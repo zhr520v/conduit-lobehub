@@ -314,5 +314,49 @@ void main() {
         'text:end',
       ]);
     });
+
+    test('handles LobeHub thinking tags (antThinking, brainstorm, reflection, inner_monologue, justification)', () {
+      final splitter = StreamingReasoningTagSplitter();
+      final events = splitter.feed(
+        '<antThinking>claude</antThinking>'
+        '<brainstorm>ideas</brainstorm>'
+        '<reflection>review</reflection>'
+        '<inner_monologue>silent</inner_monologue>'
+        '<justification>proof</justification>',
+      );
+      check(collect(events)).deepEquals([
+        'reason:claude',
+        'end',
+        'reason:ideas',
+        'end',
+        'reason:review',
+        'end',
+        'reason:silent',
+        'end',
+        'reason:proof',
+        'end',
+      ]);
+    });
+  });
+
+  group('countWords and formatCompletedSummary', () {
+    test('counts Latin, CJK, and mixed words', () {
+      check(ReasoningParser.countWords('Hello world from AI')).equals(4);
+      check(ReasoningParser.countWords('深度推理能力测试')).equals(8);
+      check(ReasoningParser.countWords('LobeHub 客户端 4.0')).equals(5);
+    });
+
+    test('formats completed summary', () {
+      check(
+        ReasoningParser.formatCompletedSummary(seconds: 12, words: 100),
+      ).equals('Thought for 12s (100 words)');
+      check(
+        ReasoningParser.formatCompletedSummary(
+          seconds: 12,
+          words: 100,
+          isChinese: true,
+        ),
+      ).equals('已深度思考 12秒 (100字)');
+    });
   });
 }

@@ -1,5 +1,6 @@
 import 'package:html_unescape/html_unescape.dart';
 
+import 'reasoning_parser.dart';
 import 'semantic_details.dart';
 
 /// Content preprocessing, sanitization, and transformation for Markdown.
@@ -49,7 +50,7 @@ class ConduitMarkdownPreprocessor {
   /// Combined pattern for all reasoning/thinking blocks.
   static final _reasoningBlocks = RegExp(
     r'<details\s+type="(?:reasoning|code_interpreter)"[^>]*>[\s\S]*?</details>|'
-    r'<(?:think|thinking|reasoning|reason|thought|Thought)(?:\s[^>]*)?>[\s\S]*?</(?:think|thinking|reasoning|reason|thought|Thought)>|'
+    r'<(?:think|thinking|reasoning|reason|thought|Thought|antThinking|brainstorm|reflection|inner_monologue|justification)(?:\s[^>]*)?>[\s\S]*?</(?:think|thinking|reasoning|reason|thought|Thought|antThinking|brainstorm|reflection|inner_monologue|justification)>|'
     r'<\|begin_of_thought\|>[\s\S]*?<\|end_of_thought\|>|'
     r'◁think▷[\s\S]*?◁/think▷',
     multiLine: true,
@@ -216,7 +217,9 @@ class ConduitMarkdownPreprocessor {
     output = _maskCodeAndTransform(
       output,
       (masked) =>
-          _dropTruncatedSemanticOpener(_normalizeDetailsOpenTags(masked)),
+          _normalizeRawReasoningTags(
+            _dropTruncatedSemanticOpener(_normalizeDetailsOpenTags(masked)),
+          ),
     );
 
     // Raw model output can attach Open WebUI's tool-call block directly to
@@ -630,6 +633,73 @@ class ConduitMarkdownPreprocessor {
       buffer.write(ch);
     }
     return changed ? buffer.toString() : tag;
+  }
+
+  static String _normalizeRawReasoningTags(String input) {
+    if (!input.contains('<') && !input.contains('◁')) {
+      return input;
+    }
+    var hasCandidateTag = false;
+    for (final pair in defaultReasoningTagPairs) {
+      if (input.contains(pair.$1)) {
+        hasCandidateTag = true;
+        break;
+      }
+    }
+    if (!hasCandidateTag) {
+      return input;
+    }
+
+    final splitter = StreamingReasoningTagSplitter();
+    final events = [...splitter.feed(input), ...splitter.flush()];
+    final buffer = StringBuffer();
+    final reasoning = StringBuffer();
+    var inReasoning = false;
+
+    for (final event in events) {
+      switch (event) {
+        case RawReasoningTagText(:final text):
+          buffer.write(text);
+        case RawReasoningTagReasoning(:final text):
+          inReasoning = true;
+          reasoning.write(text);
+        case RawReasoningTagEnd():
+          inReasoning = false;
+          final rText = reasoning.toString().trim();
+          reasoning.clear();
+          if (rText.isNotEmpty) {
+            final prev = buffer.toString();
+            if (prev.isNotEmpty && !prev.endsWith('\n\n')) {
+              buffer.write(prev.endsWith('\n') ? '\n' : '\n\n');
+            }
+            buffer.write(
+              '<details type="reasoning" client="lobehub" done="true">\n'
+              '<summary>Thinking…</summary>\n'
+              '$rText\n'
+              '</details>\n\n',
+            );
+          }
+      }
+    }
+
+    if (inReasoning || splitter.isInsideReasoning) {
+      final rText = reasoning.toString().trim();
+      reasoning.clear();
+      if (rText.isNotEmpty) {
+        final prev = buffer.toString();
+        if (prev.isNotEmpty && !prev.endsWith('\n\n')) {
+          buffer.write(prev.endsWith('\n') ? '\n' : '\n\n');
+        }
+        buffer.write(
+          '<details type="reasoning" client="lobehub" done="false" open="true">\n'
+          '<summary>Thinking…</summary>\n'
+          '$rText\n'
+          '</details>\n',
+        );
+      }
+    }
+
+    return buffer.toString();
   }
 
   static String _removeEmojis(String input) {

@@ -15,6 +15,7 @@ import '../../chat/providers/chat_providers.dart';
 import '../providers/sidebar_providers.dart';
 import 'responsive_drawer_layout.dart';
 import '../../../shared/widgets/sidebar_layout_contract.dart';
+import '../views/main_navigation_shell.dart';
 import 'sidebar_page.dart';
 import 'sidebar_tab_registry.dart';
 
@@ -41,7 +42,7 @@ class DrawerShellPage extends ConsumerWidget {
         ? context.colorTokens.scrimMedium
         : context.colorTokens.scrimStrong;
 
-    return ResponsiveDrawerLayout(
+    final drawerLayout = ResponsiveDrawerLayout(
       maxFraction: isTablet ? 0.42 : 1.0,
       edgeFraction: isTablet ? 0.36 : 1.0,
       settleFraction: 0.06,
@@ -72,6 +73,11 @@ class DrawerShellPage extends ConsumerWidget {
       },
       drawer: const SidebarPage(),
       layoutBuilder: (layout) => MacDesktopShortcuts(child: layout),
+      child: child,
+    );
+
+    return MainNavigationShell(
+      chatsView: drawerLayout,
       child: child,
     );
   }

@@ -1418,6 +1418,59 @@ class AuthStateManager extends _$AuthStateManager {
     }
   }
 
+  /// Commits a successful self-hosted LobeHub authentication session.
+  Future<bool> commitLobeHubSession({
+    required ServerConfig serverConfig,
+    required String apiKey,
+    required User user,
+  }) async {
+    final tokenStr = apiKey.trim();
+    if (tokenStr.isEmpty) {
+      throw Exception('API key cannot be empty');
+    }
+    _acceptFreshlyIssuedServerToken(tokenStr, source: 'lobehub');
+    final attemptRevision = _beginAuthAttempt();
+    _update(
+      (current) => current.copyWith(
+        status: AuthStatus.loading,
+        isLoading: true,
+        clearError: true,
+      ),
+    );
+
+    final storage = ref.read(optimizedStorageServiceProvider);
+    try {
+      if (_authAttemptSuperseded(attemptRevision)) return false;
+      await storage.saveServerConfigs([serverConfig]);
+      await storage.setActiveServerId(serverConfig.id);
+      await storage.saveAuthToken(tokenStr);
+      await storage.saveLocalUser(user);
+
+      _update(
+        (current) => current.copyWith(
+          status: AuthStatus.authenticated,
+          isLoading: false,
+          token: tokenStr,
+          user: user,
+          clearError: true,
+        ),
+      );
+      ref.invalidate(serverConfigsProvider);
+      ref.invalidate(activeServerProvider);
+      return true;
+    } catch (e) {
+      if (_authAttemptSuperseded(attemptRevision)) return false;
+      _update(
+        (current) => current.copyWith(
+          status: AuthStatus.error,
+          isLoading: false,
+          error: e.toString(),
+        ),
+      );
+      return false;
+    }
+  }
+
   void _restorePrevalidatedProxyAttemptState({
     required int attemptRevision,
     required int capturedSessionSafetyEpoch,

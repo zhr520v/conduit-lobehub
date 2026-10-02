@@ -76,6 +76,9 @@ class DetailsBlockSyntax extends md.BlockSyntax {
     for (final match in _attributePattern.allMatches(openingTag)) {
       attributes[match.group(1)!] = match.group(2) ?? '';
     }
+    if (RegExp(r'\bopen(?:\s|>|=)', caseSensitive: false).hasMatch(openingTag)) {
+      attributes['open'] = 'true';
+    }
 
     var innerContent = rawBlock.substring(openingMatch.end, closingIndex);
     String? summaryText;

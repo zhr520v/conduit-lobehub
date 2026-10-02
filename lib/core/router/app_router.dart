@@ -26,6 +26,7 @@ import '../../features/auth/views/authentication_page.dart';
 import '../../features/auth/views/backend_chooser_page.dart';
 import '../../features/auth/views/connect_signin_page.dart';
 import '../../features/auth/views/connection_issue_page.dart';
+import '../../features/auth/views/lobehub_connection_page.dart';
 import '../../features/auth/views/proxy_auth_page.dart';
 import '../../features/auth/views/server_connection_page.dart';
 import '../../features/auth/views/sso_auth_page.dart';
@@ -33,11 +34,8 @@ import '../../features/chat/views/chat_page.dart';
 import '../../features/navigation/views/folder_page.dart';
 import '../../features/navigation/widgets/drawer_shell_page.dart';
 import '../../features/navigation/views/splash_launcher_page.dart';
-import '../../features/notes/views/notes_list_page.dart';
 import '../../shared/widgets/adaptive_route_shell.dart';
 import '../../shared/widgets/platform_ui/platform_ui.dart';
-import '../../features/channels/views/channel_page.dart';
-import '../../features/notes/views/note_editor_page.dart';
 import '../../features/profile/views/about_page.dart';
 import '../../features/profile/views/account_settings_page.dart';
 import '../../features/profile/views/app_customization_page.dart';
@@ -323,7 +321,7 @@ class RouterNotifier extends ChangeNotifier {
     }
 
     if (!hasActiveServer) {
-      // No server configured - redirect to onboarding chooser.
+      // No server configured - redirect to LobeHub connection onboarding.
       // Exception: allow staying on server connection, authentication,
       // proxy auth, and SSO pages during the connection/auth flow.
       if (location == Routes.serverConnection ||
@@ -333,7 +331,7 @@ class RouterNotifier extends ChangeNotifier {
           location == Routes.login) {
         return null;
       }
-      return Routes.backendChooser;
+      return Routes.serverConnection;
     }
 
     // Allow staying on server connection page
@@ -456,8 +454,7 @@ final goRouterProvider = Provider<GoRouter>((ref) {
       ),
     ),
     // ShellRoute keeps the drawer/sidebar mounted across page navigations
-    // so it doesn't reload on tablets when switching between chat, channels,
-    // and notes.
+    // so it doesn't reload on tablets when switching between chat and folders.
     ShellRoute(
       builder: (context, state, child) => DrawerShellPage(child: child),
       routes: [
@@ -478,35 +475,55 @@ final goRouterProvider = Provider<GoRouter>((ref) {
             );
           },
         ),
-        GoRoute(
-          path: Routes.noteEditor,
-          name: RouteNames.noteEditor,
-          pageBuilder: (context, state) {
-            final noteId = state.pathParameters['id'];
-            if (noteId == null || noteId.isEmpty) {
-              return _buildNoTransitionPage(
-                state: state,
-                child: const NotesListPage(),
-              );
-            }
-            return _buildNoTransitionPage(
-              state: state,
-              child: NoteEditorPage(key: ValueKey(noteId), noteId: noteId),
-            );
-          },
-        ),
-        GoRoute(
-          path: Routes.channel,
-          name: RouteNames.channel,
-          pageBuilder: (context, state) {
-            final channelId = state.pathParameters['id']!;
-            return _buildNoTransitionPage(
-              state: state,
-              child: ChannelPage(channelId: channelId),
-            );
-          },
-        ),
       ],
+    ),
+    // Pruned OpenWebUI legacy routes redirected cleanly to Routes.chat
+    GoRoute(
+      path: '/',
+      redirect: (context, state) => Routes.chat,
+    ),
+    GoRoute(
+      path: Routes.notes,
+      name: RouteNames.notes,
+      redirect: (context, state) => Routes.chat,
+    ),
+    GoRoute(
+      path: Routes.noteEditor,
+      name: RouteNames.noteEditor,
+      redirect: (context, state) => Routes.chat,
+    ),
+    GoRoute(
+      path: Routes.channel,
+      name: RouteNames.channel,
+      redirect: (context, state) => Routes.chat,
+    ),
+    GoRoute(
+      path: '/channel',
+      redirect: (context, state) => Routes.chat,
+    ),
+    GoRoute(
+      path: '/channels',
+      redirect: (context, state) => Routes.chat,
+    ),
+    GoRoute(
+      path: '/channels/:id',
+      redirect: (context, state) => Routes.chat,
+    ),
+    GoRoute(
+      path: '/terminal',
+      redirect: (context, state) => Routes.chat,
+    ),
+    GoRoute(
+      path: '/terminal/:id',
+      redirect: (context, state) => Routes.chat,
+    ),
+    GoRoute(
+      path: '/hermes',
+      redirect: (context, state) => Routes.chat,
+    ),
+    GoRoute(
+      path: '/hermes/:id',
+      redirect: (context, state) => Routes.chat,
     ),
     GoRoute(
       path: Routes.login,
@@ -517,14 +534,13 @@ final goRouterProvider = Provider<GoRouter>((ref) {
     GoRoute(
       path: Routes.backendChooser,
       name: RouteNames.backendChooser,
-      pageBuilder: (context, state) =>
-          _buildPlatformPage(state: state, child: const BackendChooserPage()),
+      redirect: (context, state) => Routes.serverConnection,
     ),
     GoRoute(
       path: Routes.serverConnection,
       name: RouteNames.serverConnection,
       pageBuilder: (context, state) =>
-          _buildPlatformPage(state: state, child: const ServerConnectionPage()),
+          _buildPlatformPage(state: state, child: const LobeHubConnectionPage()),
     ),
     GoRoute(
       path: Routes.connectionIssue,
@@ -577,7 +593,7 @@ final goRouterProvider = Provider<GoRouter>((ref) {
           // Fallback - should not happen in normal flow
           return _buildPlatformPage(
             state: state,
-            child: const ServerConnectionPage(),
+            child: const LobeHubConnectionPage(),
           );
         }
         return _buildPlatformPage(
@@ -714,12 +730,6 @@ final goRouterProvider = Provider<GoRouter>((ref) {
           _buildPlatformPage(state: state, child: const AboutPage()),
     ),
     ..._workspaceRoutes(),
-    GoRoute(
-      path: Routes.notes,
-      name: RouteNames.notes,
-      pageBuilder: (context, state) =>
-          _buildNoTransitionPage(state: state, child: const NotesListPage()),
-    ),
   ];
 
   final router = GoRouter(

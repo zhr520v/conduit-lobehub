@@ -1311,6 +1311,10 @@ CompiledMarkdownDetailsData _buildCompiledDetailsData({
   final rawDuration = attributes['duration']?.trim() ?? '';
   final durationSeconds =
       int.tryParse(rawDuration.isEmpty ? '0' : rawDuration) ?? 0;
+  final client = attributes['client']?.trim();
+  final isOpen = attributes.containsKey('open') ||
+      attributes['open'] == 'true' ||
+      client == 'lobehub';
 
   return CompiledMarkdownDetailsData(
     summaryText: summaryText,
@@ -1328,6 +1332,8 @@ CompiledMarkdownDetailsData _buildCompiledDetailsData({
     toolCallData: type == 'tool_calls'
         ? _compileToolCallData(attributes)
         : null,
+    client: client,
+    isOpen: isOpen,
   );
 }
 

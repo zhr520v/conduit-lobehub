@@ -106,6 +106,18 @@ class AuthActions {
     );
   }
 
+  Future<bool> commitLobeHubSession({
+    required ServerConfig serverConfig,
+    required String apiKey,
+    required User user,
+  }) {
+    return _auth.commitLobeHubSession(
+      serverConfig: serverConfig,
+      apiKey: apiKey,
+      user: user,
+    );
+  }
+
   Future<bool> ldapLogin(
     String username,
     String password, {

@@ -1094,6 +1094,8 @@ class CompiledMarkdownDetailsData {
     this.hasDuration = false,
     this.status,
     this.toolCallData,
+    this.client,
+    this.isOpen = false,
   });
 
   final String summaryText;
@@ -1113,6 +1115,12 @@ class CompiledMarkdownDetailsData {
   /// a done block without one is still shown as thinking.
   final bool hasDuration;
   final CompiledMarkdownToolCallData? toolCallData;
+  final String? client;
+  final bool isOpen;
+
+  bool get isLobeReasoning =>
+      (kind == CompiledMarkdownDetailsKind.reasoning) &&
+      (client == 'lobehub' || isOpen);
 
   bool get supportsInlineExpansion =>
       kind == CompiledMarkdownDetailsKind.reasoning ||
@@ -1158,6 +1166,8 @@ class CompiledMarkdownDetailsData {
     'durationSeconds': durationSeconds,
     'hasDuration': hasDuration,
     'toolCallData': toolCallData?.toMap(),
+    'client': client,
+    'isOpen': isOpen,
   };
 
   factory CompiledMarkdownDetailsData.fromMap(Map<String, Object?> map) {
@@ -1182,6 +1192,8 @@ class CompiledMarkdownDetailsData {
           : CompiledMarkdownToolCallData.fromMap(
               toolCallDataMap.cast<String, Object?>(),
             ),
+      client: map['client'] as String?,
+      isOpen: map['isOpen'] == true,
     );
   }
 
@@ -1199,7 +1211,9 @@ class CompiledMarkdownDetailsData {
         other.isDone == isDone &&
         other.isPending == isPending &&
         other.durationSeconds == durationSeconds &&
-        other.toolCallData == toolCallData;
+        other.toolCallData == toolCallData &&
+        other.client == client &&
+        other.isOpen == isOpen;
   }
 
   @override
@@ -1216,6 +1230,8 @@ class CompiledMarkdownDetailsData {
     isPending,
     durationSeconds,
     toolCallData,
+    client,
+    isOpen,
   );
 }
 
