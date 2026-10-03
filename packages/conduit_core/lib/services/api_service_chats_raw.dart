@@ -24,15 +24,88 @@ mixin _ChatsRawApi on _ApiServiceBase {
     bool includePinned = true,
     bool includeFolders = true,
   }) async {
-    final response = await _dio.get(
-      '/api/v1/chats/',
-      queryParameters: {
-        'page': page,
-        'include_pinned': includePinned,
-        'include_folders': includeFolders,
-      },
-    );
-    return _coerceRawMapList(response.data);
+    try {
+      final response = await _dio.get(
+        '/api/v1/chats/',
+        queryParameters: {
+          'page': page,
+          'include_pinned': includePinned,
+          'include_folders': includeFolders,
+        },
+      );
+      return _coerceRawMapList(response.data);
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 404) {
+        return _getLobeHubTopicListPageRaw(page: page);
+      }
+      rethrow;
+    }
+  }
+
+  /// Fallback for LobeHub: fetches topics from `/api/v1/topics` and maps them
+  /// to the raw chat list item schema.
+  Future<List<Map<String, dynamic>>> _getLobeHubTopicListPageRaw({
+    required int page,
+  }) async {
+    try {
+      final response = await _dio.get(
+        '/api/v1/topics',
+        queryParameters: {
+          'page': page,
+          'pageSize': 60,
+        },
+      );
+      final data = response.data;
+      List<dynamic>? topicsList;
+      if (data is Map) {
+        final innerData = data['data'];
+        if (innerData is Map && innerData['topics'] is List) {
+          topicsList = innerData['topics'] as List;
+        } else if (data['topics'] is List) {
+          topicsList = data['topics'] as List;
+        } else if (innerData is List) {
+          topicsList = innerData;
+        }
+      } else if (data is List) {
+        topicsList = data;
+      }
+      if (topicsList == null || topicsList.isEmpty) {
+        return const <Map<String, dynamic>>[];
+      }
+
+      final result = <Map<String, dynamic>>[];
+      for (final topic in topicsList) {
+        if (topic is! Map) continue;
+        final id = topic['id']?.toString() ?? '';
+        if (id.isEmpty) continue;
+        final title = (topic['title'] as String?)?.trim();
+        final effectiveTitle =
+            (title != null && title.isNotEmpty) ? title : 'New Chat';
+        final updatedAt = _parseServerEpochSeconds(
+              topic['updatedAt'] ?? topic['updated_at'],
+            ) ??
+            DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final createdAt = _parseServerEpochSeconds(
+              topic['createdAt'] ?? topic['created_at'],
+            ) ??
+            updatedAt;
+        final pinned = topic['favorite'] == true || topic['starred'] == true;
+        final folderId = topic['groupId']?.toString();
+
+        result.add({
+          'id': id,
+          'title': effectiveTitle,
+          'updated_at': updatedAt,
+          'created_at': createdAt,
+          'last_read_at': updatedAt,
+          'pinned': pinned,
+          if (folderId != null) 'folder_id': folderId,
+        });
+      }
+      return result;
+    } on DioException {
+      return const <Map<String, dynamic>>[];
+    }
   }
 
   /// GET `/api/v1/chats/archived?page={page}&order_by=updated_at&direction=desc`
@@ -44,15 +117,22 @@ mixin _ChatsRawApi on _ApiServiceBase {
   Future<List<Map<String, dynamic>>> getArchivedChatListPageRaw({
     required int page,
   }) async {
-    final response = await _dio.get(
-      '/api/v1/chats/archived',
-      queryParameters: {
-        'page': page,
-        'order_by': 'updated_at',
-        'direction': 'desc',
-      },
-    );
-    return _coerceRawMapList(response.data);
+    try {
+      final response = await _dio.get(
+        '/api/v1/chats/archived',
+        queryParameters: {
+          'page': page,
+          'order_by': 'updated_at',
+          'direction': 'desc',
+        },
+      );
+      return _coerceRawMapList(response.data);
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 404) {
+        return const <Map<String, dynamic>>[];
+      }
+      rethrow;
+    }
   }
 
   /// GET `/api/v1/chats/{id}` — the raw `ChatResponse` map (id, user_id,
@@ -95,8 +175,130 @@ mixin _ChatsRawApi on _ApiServiceBase {
       return map;
     } on DioException catch (e) {
       if (e.response?.statusCode == 404) {
-        return null;
+        return _getLobeHubChatRaw(id);
       }
+      rethrow;
+    }
+  }
+
+  /// Fallback for LobeHub: fetches messages for topic [id] from `/api/v1/messages`
+  /// and constructs the raw `ChatResponse` map with `chat.history.messages`.
+  Future<Map<String, dynamic>?> _getLobeHubChatRaw(String id) async {
+    try {
+      final messagesResponse = await _dio.get(
+        '/api/v1/messages',
+        queryParameters: {'topicId': id},
+      );
+      final msgData = messagesResponse.data;
+      List<dynamic>? messagesList;
+      if (msgData is Map) {
+        final inner = msgData['data'];
+        if (inner is Map && inner['messages'] is List) {
+          messagesList = inner['messages'] as List;
+        } else if (msgData['messages'] is List) {
+          messagesList = msgData['messages'] as List;
+        } else if (inner is List) {
+          messagesList = inner;
+        }
+      } else if (msgData is List) {
+        messagesList = msgData;
+      }
+
+      String title = 'New Chat';
+      int createdAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      int updatedAt = createdAt;
+      bool pinned = false;
+      String? folderId;
+      String? model;
+      String? agentId;
+
+      Map<String, dynamic>? topicObj;
+      if (messagesList != null && messagesList.isNotEmpty) {
+        final firstMsg = messagesList.first;
+        if (firstMsg is Map && firstMsg['topic'] is Map) {
+          topicObj = Map<String, dynamic>.from(firstMsg['topic'] as Map);
+        }
+      }
+
+      if (topicObj == null) {
+        try {
+          final topicResp = await _dio.get('/api/v1/topics/$id');
+          final tData = topicResp.data;
+          if (tData is Map && tData['data'] is Map) {
+            topicObj = Map<String, dynamic>.from(tData['data'] as Map);
+          } else if (tData is Map) {
+            topicObj = Map<String, dynamic>.from(tData);
+          }
+        } catch (_) {}
+      }
+
+      if (topicObj != null) {
+        final tTitle = (topicObj['title'] as String?)?.trim();
+        if (tTitle != null && tTitle.isNotEmpty) {
+          title = tTitle;
+        }
+        createdAt = _parseServerEpochSeconds(topicObj['createdAt']) ?? createdAt;
+        updatedAt = _parseServerEpochSeconds(topicObj['updatedAt']) ?? updatedAt;
+        pinned = topicObj['favorite'] == true || topicObj['starred'] == true;
+        folderId = topicObj['groupId']?.toString();
+        model = topicObj['model']?.toString();
+        agentId = topicObj['agentId']?.toString();
+      }
+
+      final messagesMap = <String, Map<String, dynamic>>{};
+      String? currentId;
+
+      if (messagesList != null) {
+        for (final m in messagesList) {
+          if (m is! Map) continue;
+          final mId = m['id']?.toString() ?? '';
+          if (mId.isEmpty) continue;
+          currentId = mId;
+          final role = m['role']?.toString() ?? 'user';
+          final content = m['content']?.toString() ?? '';
+          final mCreatedAt = _parseServerEpochSeconds(m['createdAt']) ?? createdAt;
+          final mUpdatedAt = _parseServerEpochSeconds(m['updatedAt']) ?? updatedAt;
+          final mModel = m['model']?.toString() ?? model;
+          final reasoning = m['reasoning']?.toString();
+
+          messagesMap[mId] = {
+            'id': mId,
+            'role': role,
+            'content': content,
+            'timestamp': mCreatedAt,
+            'created_at': mCreatedAt,
+            'updated_at': mUpdatedAt,
+            if (m['parentId'] != null) 'parentId': m['parentId'].toString(),
+            if (mModel != null) 'model': mModel,
+            if (reasoning != null && reasoning.isNotEmpty) 'reasoning': reasoning,
+            'chatId': id,
+          };
+        }
+      }
+
+      return {
+        'id': id,
+        'title': title,
+        'created_at': createdAt,
+        'updated_at': updatedAt,
+        'pinned': pinned,
+        'archived': false,
+        if (folderId != null) 'folder_id': folderId,
+        'meta': {
+          if (agentId != null) 'agentId': agentId,
+          if (model != null) 'model': model,
+        },
+        'chat': {
+          'title': title,
+          if (model != null) 'models': [model],
+          'history': {
+            if (currentId != null) 'currentId': currentId,
+            'messages': messagesMap,
+          },
+        },
+      };
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 404) return null;
       rethrow;
     }
   }
@@ -121,6 +323,32 @@ mixin _ChatsRawApi on _ApiServiceBase {
       );
       return _requireResponseMap(response.data, 'createChatRaw');
     } on DioException catch (e) {
+      if (e.response?.statusCode == 404) {
+        // Fallback for LobeHub: create topic via POST /api/v1/topics
+        try {
+          final title = chatBlob['title'] as String? ?? 'New Chat';
+          final topicResp = await _dio.post(
+            '/api/v1/topics',
+            data: {
+              'title': title,
+              if (folderId != null) 'groupId': folderId,
+            },
+          );
+          final topicData = topicResp.data is Map
+              ? (topicResp.data['data'] ?? topicResp.data)
+              : {};
+          final newId = topicData['id']?.toString() ??
+              'tpc_${DateTime.now().millisecondsSinceEpoch}';
+          final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+          return {
+            'id': newId,
+            'title': title,
+            'created_at': now,
+            'updated_at': now,
+            'chat': chatBlob,
+          };
+        } catch (_) {}
+      }
       final code = e.response?.statusCode;
       if (code == 401 || code == 403) {
         throw SyncTerminalException(
@@ -168,8 +396,17 @@ mixin _ChatsRawApi on _ApiServiceBase {
       await _dio.delete('/api/v1/chats/$id');
       return true;
     } on DioException catch (e) {
+      if (e.response?.statusCode == 404) {
+        // Fallback for LobeHub: delete topic via DELETE /api/v1/topics/:id
+        try {
+          await _dio.delete('/api/v1/topics/$id');
+          return true;
+        } on DioException catch (e2) {
+          if (e2.response?.statusCode == 404) return false;
+        }
+        return false;
+      }
       final code = e.response?.statusCode;
-      if (code == 404) return false;
       if (code == 401 || code == 403) {
         throw SyncTerminalException(
           statusCode: code,

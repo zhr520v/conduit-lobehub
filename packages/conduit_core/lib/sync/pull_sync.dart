@@ -75,6 +75,12 @@ int _chatMessageCount(Map<String, dynamic> response) {
 int? _parseServerEpochSeconds(Object? value) {
   if (value is int) return value;
   if (value is num) return value.toInt();
+  if (value is String) {
+    final parsedInt = int.tryParse(value);
+    if (parsedInt != null) return parsedInt;
+    final dt = DateTime.tryParse(value);
+    if (dt != null) return dt.millisecondsSinceEpoch ~/ 1000;
+  }
   return null;
 }
 

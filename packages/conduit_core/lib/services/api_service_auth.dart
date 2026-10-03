@@ -220,12 +220,21 @@ mixin _AuthApi on _ApiServiceBase {
     _traceApi('Fetching user permissions');
     try {
       final response = await _dio.get('/api/v1/users/permissions');
-      return response.data as Map<String, dynamic>;
+      if (response.data is Map) {
+        return Map<String, dynamic>.from(response.data as Map);
+      }
+      return <String, dynamic>{};
     } catch (e) {
       _traceApi('Error fetching user permissions: $e');
       if (e is DioException) {
+        final status = e.response?.statusCode;
         _traceApi('Permissions error response: ${e.response?.data}');
-        _traceApi('Permissions error status: ${e.response?.statusCode}');
+        _traceApi('Permissions error status: $status');
+        if (status == 403 || status == 404) {
+          // LobeHub routes /api/v1/users/:userId where "permissions" is not a valid user id.
+          // Fall back gracefully with default permissions.
+          return <String, dynamic>{};
+        }
       }
       rethrow;
     }

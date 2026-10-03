@@ -4,25 +4,46 @@ mixin _ToolsFunctionsApi on _ApiServiceBase {
   // Tools & Functions
   Future<List<Map<String, dynamic>>> getTools() async {
     _traceApi('Fetching tools');
-    final response = await _dio.get('/api/v1/tools/');
-    return workspaceJsonList(response.data);
+    try {
+      final response = await _dio.get('/api/v1/tools/');
+      return workspaceJsonList(response.data);
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 404 || e.response?.statusCode == 403) {
+        return const [];
+      }
+      rethrow;
+    }
   }
 
   Future<List<WorkspaceToolSummary>> getWorkspaceTools() async {
-    final response = await _dio.get('/api/v1/tools/list');
-    return workspaceJsonList(response.data)
-        .map(WorkspaceToolSummary.fromJson)
-        .toList(growable: false);
+    try {
+      final response = await _dio.get('/api/v1/tools/list');
+      return workspaceJsonList(response.data)
+          .map(WorkspaceToolSummary.fromJson)
+          .toList(growable: false);
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 404 || e.response?.statusCode == 403) {
+        return const [];
+      }
+      rethrow;
+    }
   }
 
   Future<List<Map<String, dynamic>>> getFunctions() async {
     _traceApi('Fetching functions');
-    final response = await _dio.get('/api/v1/functions/');
-    final data = response.data;
-    if (data is List) {
-      return data.cast<Map<String, dynamic>>();
+    try {
+      final response = await _dio.get('/api/v1/functions/');
+      final data = response.data;
+      if (data is List) {
+        return data.cast<Map<String, dynamic>>();
+      }
+      return [];
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 404 || e.response?.statusCode == 403) {
+        return const [];
+      }
+      rethrow;
     }
-    return [];
   }
 
   Future<WorkspaceToolDetail?> createWorkspaceTool(

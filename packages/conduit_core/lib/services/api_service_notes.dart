@@ -37,10 +37,9 @@ mixin _NotesApi on _ApiServiceBase {
         return (const <Map<String, dynamic>>[], true);
       }
     } on DioException catch (e) {
-      // 401/403 indicates notes feature is disabled server-side or user lacks permission
-      // OpenWebUI returns 401 when user doesn't have "features.notes" permission
+      // 401/403/404 indicates notes feature is disabled server-side or non-existent (e.g. LobeHub)
       final statusCode = e.response?.statusCode;
-      if (statusCode == 401 || statusCode == 403) {
+      if (statusCode == 401 || statusCode == 403 || statusCode == 404) {
         DebugLogger.log(
           'feature-disabled',
           scope: 'api/notes',

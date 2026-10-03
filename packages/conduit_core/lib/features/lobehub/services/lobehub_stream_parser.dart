@@ -180,6 +180,8 @@ final class LobeHubStreamParser {
       case 'text.delta':
       case 'content':
       case 'message.delta':
+      case 'response.output_text.delta':
+      case 'output_text.delta':
         final text = _extractTextContent(
           frame.data,
           const ['text', 'delta', 'content'],
@@ -192,6 +194,9 @@ final class LobeHubStreamParser {
       case 'reasoning':
       case 'reasoning.delta':
       case 'thinking':
+      case 'response.reasoning.delta':
+      case 'response.output_reasoning.delta':
+      case 'response.reasoning_text.delta':
         final reasoning = _extractTextContent(
           frame.data,
           const [
@@ -218,6 +223,9 @@ final class LobeHubStreamParser {
       case 'stop':
       case 'done':
       case 'finish':
+      case 'response.completed':
+      case 'response.done':
+      case 'response.output_item.done':
         yield _parseStopPayload(frame.data);
         return;
 

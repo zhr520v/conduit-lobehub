@@ -22,16 +22,23 @@ mixin _UserSettingsApi on _ApiServiceBase {
     ApiAuthSnapshot? authSnapshot,
   }) async {
     _traceApi('Fetching user settings');
-    final response = await _dio.get(
-      '/api/v1/users/user/settings',
-      options: _withAuthSnapshot(Options(), authSnapshot),
-    );
-    final data = response.data;
-    // Handle null response from server (happens for new users with no settings)
-    if (data is Map<String, dynamic>) {
-      return data;
+    try {
+      final response = await _dio.get(
+        '/api/v1/users/user/settings',
+        options: _withAuthSnapshot(Options(), authSnapshot),
+      );
+      final data = response.data;
+      // Handle null response from server (happens for new users with no settings)
+      if (data is Map<String, dynamic>) {
+        return data;
+      }
+      return <String, dynamic>{};
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 404 || e.response?.statusCode == 403) {
+        return <String, dynamic>{};
+      }
+      rethrow;
     }
-    return <String, dynamic>{};
   }
 
   Future<void> updateUserSettings(

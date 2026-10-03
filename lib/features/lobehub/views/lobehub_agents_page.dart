@@ -85,6 +85,11 @@ class _LobehubAgentsPageState extends ConsumerState<LobehubAgentsPage> {
     super.initState();
     _isGridView = widget.initialGridView;
     _searchController.addListener(_onSearchChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        ref.read(lobeAgentsProvider.notifier).loadAgents();
+      }
+    });
   }
 
   @override

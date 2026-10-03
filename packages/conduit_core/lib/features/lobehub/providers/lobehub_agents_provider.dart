@@ -4,6 +4,7 @@ import 'package:collection/collection.dart';
 import 'package:meta/meta.dart';
 import 'package:riverpod/riverpod.dart';
 
+import '../../../providers/app_providers.dart';
 import '../models/lobe_agent.dart';
 import '../models/lobe_topic.dart';
 import '../services/lobehub_api_client.dart';
@@ -121,7 +122,23 @@ class LobeAgentsState {
 }
 
 /// Provider for supplying the [LobeHubApiClient] to LobeHub feature notifiers.
-final lobeHubApiClientProvider = Provider<LobeHubApiClient?>((ref) => null);
+final lobeHubApiClientProvider = Provider<LobeHubApiClient?>((ref) {
+  final api = ref.watch(apiServiceProvider);
+  if (api == null) return null;
+  final url = api.serverConfig.url;
+  final token = api.authToken ??
+      api.apiKey ??
+      api.serverConfig.customHeaders['X-API-Key'] ??
+      api.serverConfig.customHeaders['Authorization']?.replaceFirst(
+        RegExp(r'^Bearer\s+', caseSensitive: false),
+        '',
+      ) ??
+      '';
+  return LobeHubApiClient(
+    baseUrl: url,
+    apiKey: token,
+  );
+});
 
 /// Provider for an optional cached agents loader callback: `Future<List<LobeAgent>> Function()`.
 final lobeAgentsCacheLoaderProvider =

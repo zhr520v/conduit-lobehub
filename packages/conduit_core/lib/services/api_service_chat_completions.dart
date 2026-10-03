@@ -225,6 +225,80 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
 
     // Surface structured errors before transport binding.
     if (status < 200 || status >= 300) {
+      if (status == 404) {
+        _traceApi(
+          'sendMessageSession: 404 on /api/chat/completions, trying LobeHub /api/v1/responses',
+        );
+        try {
+          var resolvedModel = model;
+          if (!resolvedModel.startsWith('agt_')) {
+            try {
+              final agentsResp = await _dio.get('/api/v1/agents');
+              final aData = agentsResp.data;
+              List<dynamic>? agentList;
+              if (aData is Map) {
+                final d = aData['data'];
+                if (d is Map && d['agents'] is List) {
+                  agentList = d['agents'] as List;
+                } else if (aData['agents'] is List) {
+                  agentList = aData['agents'] as List;
+                } else if (d is List) {
+                  agentList = d;
+                }
+              } else if (aData is List) {
+                agentList = aData;
+              }
+              if (agentList != null && agentList.isNotEmpty) {
+                final matched = agentList.firstWhere(
+                  (a) => a is Map && a['model'] == model,
+                  orElse: () => agentList!.first,
+                );
+                if (matched is Map && matched['id'] != null) {
+                  resolvedModel = matched['id'].toString();
+                }
+              }
+            } catch (_) {}
+          }
+
+          final lobeInput = <Map<String, dynamic>>[];
+          for (final m in messages) {
+            final role = m['role']?.toString() ?? 'user';
+            final content = m['content'];
+            lobeInput.add({
+              'type': 'message',
+              'role': role,
+              'content':
+                  content is String ? content : (content?.toString() ?? ''),
+            });
+          }
+          final lobePayload = <String, dynamic>{
+            'model': resolvedModel,
+            'stream': true,
+            'input': lobeInput,
+            if (conversationId != null && !conversationId.startsWith('local:'))
+              'topicId': conversationId,
+          };
+          final lobeResp = await _dio.post<ResponseBody>(
+            '/api/v1/responses',
+            data: lobePayload,
+            options: Options(
+              responseType: ResponseType.stream,
+              validateStatus: (s) => s != null && s < 600,
+            ),
+            cancelToken: activeCancelToken,
+          );
+          if ((lobeResp.statusCode ?? 0) >= 200 &&
+              (lobeResp.statusCode ?? 0) < 300) {
+            resp = lobeResp;
+            status = lobeResp.statusCode ?? 200;
+          }
+        } catch (e) {
+          _traceApi('sendMessageSession: LobeHub /api/v1/responses error: $e');
+        }
+      }
+    }
+
+    if (status < 200 || status >= 300) {
       final error = await _decodeChatCompletionError(resp);
       final shouldRetryWithLegacy =
           metadataFormat == _ChatRequestMetadataFormat.modernV09 &&

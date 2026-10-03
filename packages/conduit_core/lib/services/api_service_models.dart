@@ -4,9 +4,27 @@ mixin _ModelsApi on _ApiServiceBase {
   // Models
   @override
   Future<List<Model>> getModels({bool includeHidden = false}) async {
-    final response = await _dio.get('/api/models');
+    Response? response;
+    try {
+      response = await _dio.get('/api/v1/models');
+    } catch (_) {
+      try {
+        response = await _dio.get('/api/models');
+      } catch (e) {
+        DebugLogger.error(
+          'models-fetch-failed',
+          scope: 'api/models',
+          error: e,
+        );
+      }
+    }
+
+    if (response == null) {
+      return const [];
+    }
 
     // Normalize common response formats:
+    // - {"data": {"models": [...]}} (LobeHub)
     // - {"data": [...]} (OpenAI)
     // - {"models": [...]} (some proxies)
     // - [...] (raw array)
@@ -21,7 +39,9 @@ mixin _ModelsApi on _ApiServiceBase {
     final payloadMap = _coerceJsonMap(payload);
     List<dynamic>? rawModels;
     if (payloadMap != null) {
+      final innerData = _coerceJsonMap(payloadMap['data']);
       rawModels =
+          _asListOrNull(innerData?['models']) ??
           _asListOrNull(payloadMap['data']) ??
           _asListOrNull(payloadMap['models']);
     } else {
@@ -49,6 +69,9 @@ mixin _ModelsApi on _ApiServiceBase {
           final normalized = raw.map(
             (key, value) => MapEntry(key.toString(), value),
           );
+          if (normalized['name'] == null && normalized['displayName'] != null) {
+            normalized['name'] = normalized['displayName'];
+          }
           final model = Model.fromJson(normalized);
           if (model.isHidden) {
             hiddenModelCount++;
@@ -74,6 +97,37 @@ mixin _ModelsApi on _ApiServiceBase {
         );
       }
     }
+
+    // Also include custom agents from LobeHub /api/v1/agents as selectable models
+    try {
+      final agentsResponse = await _dio.get('/api/v1/agents');
+      final agentsPayload = agentsResponse.data;
+      final agentsMap = _coerceJsonMap(agentsPayload);
+      final innerAgents = _coerceJsonMap(agentsMap?['data']);
+      final rawAgents = _asListOrNull(innerAgents?['agents']) ??
+          _asListOrNull(agentsMap?['data']) ??
+          _asListOrNull(agentsMap?['agents']) ??
+          _asListOrNull(agentsPayload);
+      if (rawAgents != null) {
+        for (final raw in rawAgents) {
+          if (raw is Map) {
+            final id = raw['id']?.toString();
+            final title = raw['title']?.toString() ??
+                raw['name']?.toString() ??
+                id;
+            if (id != null && id.isNotEmpty && !models.any((m) => m.id == id)) {
+              models.add(Model(
+                id: id,
+                name: title ?? id,
+                description: raw['description']?.toString(),
+                supportsStreaming: true,
+                ownedBy: 'lobehub-agent',
+              ));
+            }
+          }
+        }
+      }
+    } catch (_) {}
 
     DebugLogger.log(
       'models-count',
