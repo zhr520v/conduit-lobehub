@@ -1,6 +1,7 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide ThemeMode;
+import 'package:material_ui/material_ui.dart' show ThemeMode;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -11,12 +12,22 @@ import 'package:conduit_core/providers/app_providers.dart';
 import '../../../core/router/app_router.dart';
 import '../../../core/services/haptic_service.dart';
 import '../../../l10n/app_localizations.dart';
+import '../../../shared/services/navigation_service.dart';
 import '../../../shared/theme/theme_extensions.dart';
 import '../../../shared/theme/theme_providers.dart';
 import '../../../shared/widgets/platform_ui/platform_ui.dart';
 
+/// Notifier managing typography font scale factor.
+class LobeFontScaleNotifier extends Notifier<double> {
+  @override
+  double build() => 1.0;
+
+  set state(double value) => super.state = value;
+}
+
 /// Font scale provider for dynamic typography adjustment.
-final lobeFontScaleProvider = StateProvider<double>((ref) => 1.0);
+final lobeFontScaleProvider =
+    NotifierProvider<LobeFontScaleNotifier, double>(LobeFontScaleNotifier.new);
 
 /// Font scale preset definitions.
 enum LobeFontScalePreset {
@@ -117,8 +128,7 @@ class _LobehubSettingsPageState extends ConsumerState<LobehubSettingsPage> {
   @override
   Widget build(BuildContext context) {
     final theme = context.conduitTheme;
-    final l10n = AppLocalizations.of(context);
-    final title = l10n?.settings ?? 'Settings';
+    const title = 'Settings';
 
     return Scaffold(
       backgroundColor: theme.surfaceBackground,
@@ -191,7 +201,7 @@ class _LobehubSettingsPageState extends ConsumerState<LobehubSettingsPage> {
         color: theme.cardBackground,
         borderRadius: BorderRadius.circular(AppBorderRadius.lg),
         border: Border.all(
-          color: theme.divider.withValues(alpha: 0.5),
+          color: theme.dividerColor.withValues(alpha: 0.5),
           width: 1,
         ),
         boxShadow: theme.cardShadows,
@@ -203,7 +213,7 @@ class _LobehubSettingsPageState extends ConsumerState<LobehubSettingsPage> {
               Divider(
                 height: 1,
                 thickness: 0.5,
-                color: theme.divider.withValues(alpha: 0.3),
+                color: theme.dividerColor.withValues(alpha: 0.3),
               ),
             children[i],
           ],
@@ -236,7 +246,7 @@ class _LobehubSettingsPageState extends ConsumerState<LobehubSettingsPage> {
         user?.email ??
         'Self-hosted User';
     final userRole = widget.initialUserRole ?? user?.role ?? 'Owner';
-    final userAvatar = widget.initialUserAvatar ?? user?.avatar;
+    final userAvatar = widget.initialUserAvatar ?? user?.profileImage;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -305,7 +315,7 @@ class _LobehubSettingsPageState extends ConsumerState<LobehubSettingsPage> {
                       vertical: 3,
                     ),
                     decoration: BoxDecoration(
-                      color: theme.statusSuccess.withValues(alpha: 0.15),
+                      color: theme.success.withValues(alpha: 0.15),
                       borderRadius: BorderRadius.circular(AppBorderRadius.pill),
                     ),
                     child: Row(
@@ -315,7 +325,7 @@ class _LobehubSettingsPageState extends ConsumerState<LobehubSettingsPage> {
                           width: 6,
                           height: 6,
                           decoration: BoxDecoration(
-                            color: theme.statusSuccess,
+                            color: theme.success,
                             shape: BoxShape.circle,
                           ),
                         ),
@@ -323,7 +333,7 @@ class _LobehubSettingsPageState extends ConsumerState<LobehubSettingsPage> {
                         Text(
                           'Online',
                           style: TextStyle(
-                            color: theme.statusSuccess,
+                            color: theme.success,
                             fontSize: 10,
                             fontWeight: FontWeight.w700,
                           ),
@@ -744,7 +754,7 @@ class _LobehubSettingsPageState extends ConsumerState<LobehubSettingsPage> {
                   SliderTheme(
                     data: SliderTheme.of(context).copyWith(
                       activeTrackColor: theme.buttonPrimary,
-                      inactiveTrackColor: theme.divider.withValues(alpha: 0.4),
+                      inactiveTrackColor: theme.dividerColor.withValues(alpha: 0.4),
                       thumbColor: theme.buttonPrimary,
                       overlayColor: theme.buttonPrimary.withValues(alpha: 0.15),
                       trackHeight: 4,
@@ -953,7 +963,7 @@ class _LobehubSettingsPageState extends ConsumerState<LobehubSettingsPage> {
                   Icon(
                     Icons.check_circle_rounded,
                     size: 20,
-                    color: theme.statusSuccess,
+                    color: theme.success,
                   ),
                 ],
               ),
@@ -998,7 +1008,7 @@ class _LobehubSettingsPageState extends ConsumerState<LobehubSettingsPage> {
                   Icon(
                     Icons.check_circle_rounded,
                     size: 20,
-                    color: theme.statusSuccess,
+                    color: theme.success,
                   ),
                 ],
               ),
@@ -1287,7 +1297,7 @@ class _LobehubSettingsPageState extends ConsumerState<LobehubSettingsPage> {
           SnackBar(
             key: const Key('lobehub-clear-cache-toast'),
             content: const Text('Local cache cleared'),
-            backgroundColor: theme.statusSuccess,
+            backgroundColor: theme.success,
             duration: const Duration(seconds: 2),
           ),
         );

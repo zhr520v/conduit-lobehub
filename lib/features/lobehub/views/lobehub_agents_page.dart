@@ -258,7 +258,7 @@ class _LobehubAgentsPageState extends ConsumerState<LobehubAgentsPage> {
                 ],
               ),
             ),
-            Divider(color: theme.divider.withValues(alpha: 0.5), height: 1),
+            Divider(color: theme.dividerColor.withValues(alpha: 0.5), height: 1),
             // Scrollable full system instructions
             Flexible(
               child: SingleChildScrollView(
@@ -270,7 +270,7 @@ class _LobehubAgentsPageState extends ConsumerState<LobehubAgentsPage> {
                     color: theme.cardBackground,
                     borderRadius: BorderRadius.circular(AppBorderRadius.md),
                     border: Border.all(
-                      color: theme.divider.withValues(alpha: 0.4),
+                      color: theme.dividerColor.withValues(alpha: 0.4),
                       width: 1,
                     ),
                   ),
@@ -348,13 +348,13 @@ class _LobehubAgentsPageState extends ConsumerState<LobehubAgentsPage> {
                   horizontal: Spacing.md,
                   vertical: Spacing.xs,
                 ),
-                color: theme.statusWarning.withValues(alpha: 0.15),
+                color: theme.warning.withValues(alpha: 0.15),
                 child: Row(
                   children: [
                     Icon(
                       Icons.cloud_off_rounded,
                       size: 16,
-                      color: theme.statusWarning,
+                      color: theme.warning,
                     ),
                     const SizedBox(width: Spacing.xs),
                     Expanded(
@@ -362,7 +362,7 @@ class _LobehubAgentsPageState extends ConsumerState<LobehubAgentsPage> {
                         'Offline mode: showing cached agents',
                         style: TextStyle(
                           fontSize: 12,
-                          color: theme.statusWarning,
+                          color: theme.warning,
                           fontWeight: FontWeight.w600,
                         ),
                         maxLines: 1,
@@ -483,7 +483,7 @@ class _LobehubAgentsPageState extends ConsumerState<LobehubAgentsPage> {
               Icon(
                 Icons.error_outline_rounded,
                 size: 48,
-                color: theme.statusError,
+                color: theme.error,
               ),
               const SizedBox(height: Spacing.md),
               Text(
@@ -799,7 +799,7 @@ class _AgentListCard extends StatelessWidget {
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(AppBorderRadius.lg),
             border: Border.all(
-              color: theme.divider.withValues(alpha: 0.5),
+              color: theme.dividerColor.withValues(alpha: 0.5),
               width: 1,
             ),
           ),
@@ -927,7 +927,7 @@ class _AgentGridCard extends StatelessWidget {
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(AppBorderRadius.lg),
             border: Border.all(
-              color: theme.divider.withValues(alpha: 0.5),
+              color: theme.dividerColor.withValues(alpha: 0.5),
               width: 1,
             ),
           ),
@@ -1140,7 +1140,7 @@ class _AgentActionsModalSheet extends StatelessWidget {
             ),
           ),
           const SizedBox(height: Spacing.sm),
-          Divider(color: theme.divider.withValues(alpha: 0.5), height: 1),
+          Divider(color: theme.dividerColor.withValues(alpha: 0.5), height: 1),
           const SizedBox(height: Spacing.xs),
           // Action 1: Start New Chat
           ListTile(

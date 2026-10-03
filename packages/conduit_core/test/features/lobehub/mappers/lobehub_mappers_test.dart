@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:drift/drift.dart';
+import 'package:drift/drift.dart' hide isNull, isNotNull;
 import 'package:test/test.dart';
 
 import 'package:conduit_core/features/lobehub/models/models.dart';

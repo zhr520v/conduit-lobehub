@@ -953,7 +953,7 @@ class _LobeReasoningPillHeaderState extends State<_LobeReasoningPillHeader>
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
           decoration: BoxDecoration(
             color: theme.isDark
-                ? theme.tokens.neutralTone30.withValues(alpha: 0.45)
+                ? theme.tokens.neutralTone20.withValues(alpha: 0.45)
                 : theme.tokens.neutralTone10.withValues(alpha: 0.6),
             borderRadius: BorderRadius.circular(AppBorderRadius.pill),
             border: Border.all(

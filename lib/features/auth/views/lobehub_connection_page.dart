@@ -133,10 +133,11 @@ class _LobeHubConnectionPageState extends ConsumerState<LobeHubConnectionPage> {
 
       final conduitUser = User(
         id: lobeUser.id ?? 'lobehub_user',
+        username: username,
         name: username,
         email: lobeUser.email ?? 'user@lobehub',
         role: lobeUser.role ?? 'user',
-        avatar: lobeUser.avatar,
+        profileImage: lobeUser.avatar,
       );
 
       try {

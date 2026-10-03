@@ -17,8 +17,17 @@ export '../../lobehub/views/lobehub_agents_page.dart';
 /// Main navigation modules in the 3-module structure.
 enum MainNavigationTab { chats, agents, settings }
 
+/// Notifier managing active navigation tab index.
+class MainNavigationIndexNotifier extends Notifier<int> {
+  @override
+  int build() => 0;
+
+  set state(int value) => super.state = value;
+}
+
 /// Active main navigation tab index provider (0 = Chats, 1 = Agents, 2 = Settings).
-final mainNavigationIndexProvider = StateProvider<int>((ref) => 0);
+final mainNavigationIndexProvider =
+    NotifierProvider<MainNavigationIndexNotifier, int>(MainNavigationIndexNotifier.new);
 
 /// Tab metadata descriptor for the 3-module structure.
 class MainNavigationTabItem {
@@ -141,7 +150,7 @@ class _MainNavigationShellState extends ConsumerState<MainNavigationShell> {
     final l10n = AppLocalizations.of(context);
     final chatsLabel = l10n?.sidebarChatsTab ?? 'Chats';
     final agentsLabel = 'Agents';
-    final settingsLabel = l10n?.settings ?? 'Settings';
+    const settingsLabel = 'Settings';
 
     return [
       MainNavigationTabItem(
@@ -252,7 +261,7 @@ class _MainNavigationShellState extends ConsumerState<MainNavigationShell> {
         color: theme.surfaceBackground,
         border: Border(
           top: BorderSide(
-            color: theme.divider.withValues(alpha: 0.4),
+            color: theme.dividerColor.withValues(alpha: 0.4),
             width: 0.5,
           ),
         ),
