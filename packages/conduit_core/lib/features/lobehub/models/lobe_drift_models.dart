@@ -57,29 +57,29 @@ class ChatRow extends DataClass implements Insertable<ChatRow> {
     map['id'] = Variable<String>(id);
     map['title'] = Variable<String>(title);
     if (!nullToAbsent || folderId != null) {
-      map['folder_id'] = Variable<String?>(folderId);
+      map['folder_id'] = Variable<String>(folderId);
     }
     map['pinned'] = Variable<bool>(pinned);
     map['archived'] = Variable<bool>(archived);
     if (!nullToAbsent || currentMessageId != null) {
-      map['current_message_id'] = Variable<String?>(currentMessageId);
+      map['current_message_id'] = Variable<String>(currentMessageId);
     }
     map['created_at'] = Variable<int>(createdAt);
     map['updated_at'] = Variable<int>(updatedAt);
     if (!nullToAbsent || serverUpdatedAt != null) {
-      map['server_updated_at'] = Variable<int?>(serverUpdatedAt);
+      map['server_updated_at'] = Variable<int>(serverUpdatedAt);
     }
     map['dirty'] = Variable<bool>(dirty);
     map['deleted'] = Variable<bool>(deleted);
     map['raw_extra'] = Variable<String>(rawExtra);
     if (!nullToAbsent || lastReadAt != null) {
-      map['last_read_at'] = Variable<int?>(lastReadAt);
+      map['last_read_at'] = Variable<int>(lastReadAt);
     }
     if (!nullToAbsent || shareId != null) {
-      map['share_id'] = Variable<String?>(shareId);
+      map['share_id'] = Variable<String>(shareId);
     }
     if (!nullToAbsent || userId != null) {
-      map['user_id'] = Variable<String?>(userId);
+      map['user_id'] = Variable<String>(userId);
     }
     map['meta'] = Variable<String>(meta);
     map['blob_meta'] = Variable<String>(blobMeta);
@@ -311,23 +311,23 @@ class ChatsCompanion extends UpdateCompanion<ChatRow> {
     final map = <String, Expression<Object>>{};
     if (id.present) map['id'] = Variable<String>(id.value);
     if (title.present) map['title'] = Variable<String>(title.value);
-    if (folderId.present) map['folder_id'] = Variable<String?>(folderId.value);
+    if (folderId.present) map['folder_id'] = Variable<String>(folderId.value);
     if (pinned.present) map['pinned'] = Variable<bool>(pinned.value);
     if (archived.present) map['archived'] = Variable<bool>(archived.value);
     if (currentMessageId.present) {
-      map['current_message_id'] = Variable<String?>(currentMessageId.value);
+      map['current_message_id'] = Variable<String>(currentMessageId.value);
     }
     if (createdAt.present) map['created_at'] = Variable<int>(createdAt.value);
     if (updatedAt.present) map['updated_at'] = Variable<int>(updatedAt.value);
     if (serverUpdatedAt.present) {
-      map['server_updated_at'] = Variable<int?>(serverUpdatedAt.value);
+      map['server_updated_at'] = Variable<int>(serverUpdatedAt.value);
     }
     if (dirty.present) map['dirty'] = Variable<bool>(dirty.value);
     if (deleted.present) map['deleted'] = Variable<bool>(deleted.value);
     if (rawExtra.present) map['raw_extra'] = Variable<String>(rawExtra.value);
-    if (lastReadAt.present) map['last_read_at'] = Variable<int?>(lastReadAt.value);
-    if (shareId.present) map['share_id'] = Variable<String?>(shareId.value);
-    if (userId.present) map['user_id'] = Variable<String?>(userId.value);
+    if (lastReadAt.present) map['last_read_at'] = Variable<int>(lastReadAt.value);
+    if (shareId.present) map['share_id'] = Variable<String>(shareId.value);
+    if (userId.present) map['user_id'] = Variable<String>(userId.value);
     if (meta.present) map['meta'] = Variable<String>(meta.value);
     if (blobMeta.present) map['blob_meta'] = Variable<String>(blobMeta.value);
     if (bodySynced.present) map['body_synced'] = Variable<bool>(bodySynced.value);
@@ -460,12 +460,12 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
     map['id'] = Variable<String>(id);
     map['chat_id'] = Variable<String>(chatId);
     if (!nullToAbsent || parentId != null) {
-      map['parent_id'] = Variable<String?>(parentId);
+      map['parent_id'] = Variable<String>(parentId);
     }
     map['role'] = Variable<String>(role);
     map['content'] = Variable<String>(content);
     if (!nullToAbsent || model != null) {
-      map['model'] = Variable<String?>(model);
+      map['model'] = Variable<String>(model);
     }
     map['created_at'] = Variable<int>(createdAt);
     map['order_index'] = Variable<int>(orderIndex);
@@ -610,10 +610,10 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
     final map = <String, Expression<Object>>{};
     if (id.present) map['id'] = Variable<String>(id.value);
     if (chatId.present) map['chat_id'] = Variable<String>(chatId.value);
-    if (parentId.present) map['parent_id'] = Variable<String?>(parentId.value);
+    if (parentId.present) map['parent_id'] = Variable<String>(parentId.value);
     if (role.present) map['role'] = Variable<String>(role.value);
     if (content.present) map['content'] = Variable<String>(content.value);
-    if (model.present) map['model'] = Variable<String?>(model.value);
+    if (model.present) map['model'] = Variable<String>(model.value);
     if (createdAt.present) map['created_at'] = Variable<int>(createdAt.value);
     if (orderIndex.present) map['order_index'] = Variable<int>(orderIndex.value);
     if (payload.present) map['payload'] = Variable<String>(payload.value);
