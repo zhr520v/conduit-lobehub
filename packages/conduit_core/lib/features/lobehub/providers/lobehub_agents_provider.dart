@@ -127,7 +127,6 @@ final lobeHubApiClientProvider = Provider<LobeHubApiClient?>((ref) {
   if (api == null) return null;
   final url = api.serverConfig.url;
   final token = api.authToken ??
-      api.apiKey ??
       api.serverConfig.customHeaders['X-API-Key'] ??
       api.serverConfig.customHeaders['Authorization']?.replaceFirst(
         RegExp(r'^Bearer\s+', caseSensitive: false),

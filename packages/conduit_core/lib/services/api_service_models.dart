@@ -121,7 +121,10 @@ mixin _ModelsApi on _ApiServiceBase {
                 name: title ?? id,
                 description: raw['description']?.toString(),
                 supportsStreaming: true,
-                ownedBy: 'lobehub-agent',
+                metadata: const {
+                  'owned_by': 'lobehub-agent',
+                  'source': 'lobehub-agent',
+                },
               ));
             }
           }

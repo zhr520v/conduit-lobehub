@@ -42,6 +42,18 @@ mixin _ChatsRawApi on _ApiServiceBase {
     }
   }
 
+  int? _parseServerEpochSeconds(Object? value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) {
+      final parsedInt = int.tryParse(value);
+      if (parsedInt != null) return parsedInt;
+      final dt = DateTime.tryParse(value);
+      if (dt != null) return dt.millisecondsSinceEpoch ~/ 1000;
+    }
+    return null;
+  }
+
   /// Fallback for LobeHub: fetches topics from `/api/v1/topics` and maps them
   /// to the raw chat list item schema.
   Future<List<Map<String, dynamic>>> _getLobeHubTopicListPageRaw({
