@@ -57,6 +57,7 @@ class _LobeHubConnectionPageState extends ConsumerState<LobeHubConnectionPage> {
   bool _obscureApiKey = true;
   bool _isLoading = false;
   String? _errorMessage;
+  String? _errorDetail;
   String? _successMessage;
 
   @override
@@ -78,6 +79,7 @@ class _LobeHubConnectionPageState extends ConsumerState<LobeHubConnectionPage> {
 
     setState(() {
       _errorMessage = null;
+      _errorDetail = null;
       _successMessage = null;
     });
 
@@ -184,6 +186,7 @@ class _LobeHubConnectionPageState extends ConsumerState<LobeHubConnectionPage> {
       setState(() {
         _isLoading = false;
         _errorMessage = _formatErrorMessage(e);
+        _errorDetail = _extractErrorDetail(e);
       });
     }
   }
@@ -235,6 +238,26 @@ class _LobeHubConnectionPageState extends ConsumerState<LobeHubConnectionPage> {
     }
 
     return 'Unable to connect to server: $error';
+  }
+
+  String? _extractErrorDetail(Object error) {
+    final str = error.toString().toLowerCase();
+    if (str.contains('permission denied') || str.contains('errno = 13')) {
+      return '提示：手机未授予移动数据权限。请在手机“设置”->“应用管理”->“LobeChat”中允许“移动数据与WLAN”。';
+    }
+    if (str.contains('failed host lookup')) {
+      return '提示：域名DNS解析失败。请检查手机网络连接、关闭或开启代理尝试。';
+    }
+    if (str.contains('timeout')) {
+      return '提示：连接服务器超时。请检查网络连通性或尝试连接WiFi。';
+    }
+    if (str.contains('handshake') || str.contains('certificate')) {
+      return '提示：SSL/TLS握手证书校验异常。';
+    }
+    if (error is LobeHubException && error.message.isNotEmpty) {
+      return '详情：${error.message}';
+    }
+    return null;
   }
 
   @override
@@ -459,14 +482,30 @@ class _LobeHubConnectionPageState extends ConsumerState<LobeHubConnectionPage> {
           ),
           const SizedBox(width: Spacing.sm),
           Expanded(
-            child: Text(
-              message,
-              style: TextStyle(
-                color: theme.error,
-                fontSize: 13,
-                height: 1.4,
-                fontWeight: FontWeight.w500,
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  message,
+                  style: TextStyle(
+                    color: theme.error,
+                    fontSize: 13,
+                    height: 1.4,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (_errorDetail != null && _errorDetail!.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    _errorDetail!,
+                    style: TextStyle(
+                      color: theme.error.withValues(alpha: 0.85),
+                      fontSize: 12,
+                      height: 1.3,
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
         ],

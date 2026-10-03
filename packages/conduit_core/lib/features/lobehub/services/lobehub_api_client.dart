@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:collection/collection.dart';
 import 'package:dio/dio.dart';
+import 'package:dio/io.dart';
 import 'package:meta/meta.dart';
 
 import 'package:conduit_core/features/lobehub/models/models.dart';
@@ -159,13 +161,23 @@ class LobeHubApiClient {
         _dio = dio ??
             Dio(
               BaseOptions(
-                connectTimeout: const Duration(seconds: 15),
-                receiveTimeout: const Duration(seconds: 30),
-                sendTimeout: const Duration(seconds: 30),
+                connectTimeout: const Duration(seconds: 30),
+                receiveTimeout: const Duration(seconds: 45),
+                sendTimeout: const Duration(seconds: 45),
               ),
             ) {
     _dio.options.baseUrl = this.baseUrl;
     _dio.options.headers.putIfAbsent('Accept', () => 'application/json');
+
+    // Configure badCertificateCallback for self-hosted instances (e.g. Let's Encrypt ECC, self-signed certs)
+    final adapter = _dio.httpClientAdapter;
+    if (adapter is IOHttpClientAdapter) {
+      adapter.createHttpClient = () {
+        final client = HttpClient();
+        client.badCertificateCallback = (cert, host, port) => true;
+        return client;
+      };
+    }
 
     // Attach LobeAuthInterceptor if not already registered.
     final hasAuthInterceptor =
@@ -598,9 +610,13 @@ class LobeHubApiClient {
 
   LobeHubException _mapDioException(DioException e) {
     final statusCode = e.response?.statusCode;
+    var rawMessage = e.message ?? 'HTTP request failed with status $statusCode';
+    if (e.response == null && e.error != null) {
+      rawMessage = '$rawMessage (${e.error})';
+    }
     final message = _extractErrorMessage(
       e.response,
-      e.message ?? 'HTTP request failed with status $statusCode',
+      rawMessage,
     );
     final responseBody = e.response?.data;
 
