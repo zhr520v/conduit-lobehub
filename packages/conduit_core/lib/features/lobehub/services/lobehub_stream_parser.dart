@@ -127,7 +127,7 @@ final class LobeHubStreamParser {
   /// Splits chunks using [utf8.decoder] and [SseFrameScanner] to safely handle
   /// multi-byte UTF-8 sequences and fragmented SSE frames.
   Stream<LobeStreamEvent> parseByteStream(Stream<List<int>> byteStream) {
-    return parseTextStream(byteStream.transform(utf8.decoder));
+    return parseTextStream(utf8.decoder.bind(byteStream.cast<List<int>>()));
   }
 
   /// Parses a decoded SSE text stream into typed [LobeStreamEvent]s.

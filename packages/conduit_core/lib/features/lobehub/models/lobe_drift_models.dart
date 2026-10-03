@@ -144,7 +144,8 @@ class ChatRow extends DataClass implements Insertable<ChatRow> {
     bodySynced: json['bodySynced'] == true || json['body_synced'] == true,
   );
 
-  Map<String, dynamic> toJson() => <String, dynamic>{
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) => <String, dynamic>{
     'id': id,
     'title': title,
     'folderId': folderId,
@@ -504,7 +505,8 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
     dirty: json['dirty'] == true,
   );
 
-  Map<String, dynamic> toJson() => <String, dynamic>{
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) => <String, dynamic>{
     'id': id,
     'chatId': chatId,
     'parentId': parentId,
