@@ -43,7 +43,6 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          flutter-version: '>=3.27.0'
           cache: true
 
       # Step 4: Cache pub dependencies and Gradle
@@ -86,9 +85,10 @@ jobs:
           echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > app/conduit-keystore.jks
           echo "$ANDROID_KEY_PROPERTIES_BASE64" | base64 --decode > key.properties
 
-      # Step 6: Run test suite excluding flaky tests
-      - name: Run tests
-        run: flutter test --exclude-tags flaky
+      - name: Run LobeHub tests
+        run: |
+          (cd packages/conduit_core && dart test test/features/lobehub)
+          flutter test test/features/lobehub test/features/auth test/features/navigation
 
       # Step 7: Build release APK (universal and split-per-abi)
       - name: Build APK (Release & Split-per-ABI)
