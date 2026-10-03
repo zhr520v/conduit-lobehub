@@ -166,7 +166,7 @@ class LobeHubApiClient {
                 sendTimeout: const Duration(seconds: 45),
               ),
             ) {
-    _dio.options.baseUrl = this.baseUrl;
+    _dio.options.baseUrl = this.rootUrl;
     _dio.options.headers.putIfAbsent('Accept', () => 'application/json');
 
     // Configure badCertificateCallback for self-hosted instances (e.g. Let's Encrypt ECC, self-signed certs)
@@ -244,21 +244,13 @@ class LobeHubApiClient {
     return trimmed;
   }
 
-  /// Builds a resolved request path incorporating subpaths from [rootUrl].
+  /// Builds a normalized request path for [dio].
   String _buildPath(String endpoint) {
     var ep = endpoint.trim();
     if (!ep.startsWith('/')) {
       ep = '/$ep';
     }
-
-    final rootUri = Uri.tryParse(rootUrl);
-    final rootPath = (rootUri != null && rootUri.path.isNotEmpty)
-        ? (rootUri.path.endsWith('/')
-            ? rootUri.path.substring(0, rootUri.path.length - 1)
-            : rootUri.path)
-        : '';
-
-    return '$rootPath$ep';
+    return ep;
   }
 
   // ==========================================================================

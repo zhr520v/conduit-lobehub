@@ -91,7 +91,11 @@ class _LobeHubConnectionPageState extends ConsumerState<LobeHubConnectionPage> {
     final normalizedUrl = LobeHubConnectionPage.normalizeServerUrl(rawUrl);
     _urlController.text = normalizedUrl;
 
-    final apiKey = _apiKeyController.text.trim();
+    var apiKey = _apiKeyController.text.trim();
+    if (apiKey.startsWith('k-lh-')) {
+      apiKey = 's$apiKey';
+      _apiKeyController.text = apiKey;
+    }
 
     setState(() {
       _isLoading = true;
