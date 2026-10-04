@@ -225,6 +225,20 @@ Future<void> durableSend(
     return;
   }
 
+  final sendApi = sendMutationOwner.openWebUiApi;
+  final isLobeHub = sendApi is ApiService && sendApi.serverConfig.isLobeHub;
+  final modelProvider = isLobeHub ? resolveModelProvider(selectedModel) : null;
+  if (isLobeHub && (modelProvider == null || modelProvider.trim().isEmpty)) {
+    throw StateError('The selected LobeHub model has no valid provider.');
+  }
+  final durableIdentity = isLobeHub
+      ? <String, dynamic>{
+          'backend': 'lobehub',
+          'model': selectedModel.id,
+          'provider': modelProvider,
+        }
+      : const <String, dynamic>{};
+
   final filterIds = selectedFilterIdsForModel(ref, selectedModel);
   final now = ref.read(syncClockProvider).nowEpochSeconds();
   final selectedTerminalId = ref.read(selectedTerminalIdProvider);
@@ -276,6 +290,7 @@ Future<void> durableSend(
       'childrenIds': const <String>[],
       if (selectedModel.name.trim().isNotEmpty)
         'modelName': selectedModel.name.trim(),
+      ...durableIdentity,
     },
   );
   ref.read(chatMessagesProvider.notifier).addMessages([
@@ -357,6 +372,7 @@ Future<void> durableSend(
         modelId: selectedModel.id,
         modelName: selectedModel.name,
         now: now,
+        metadata: durableIdentity,
       );
       final rows = ChatBlobMapper.blobToRows(
         chatId: localId,
@@ -377,6 +393,8 @@ Future<void> durableSend(
         updatedAt: DateTime.now(),
         messages: durableOptimisticMessages,
         folderId: pendingFolderId,
+        model: isLobeHub ? selectedModel.id : null,
+        metadata: durableIdentity,
       );
       sendHandle._bindConversation(localConversation);
       final stillOwnsEmptyComposer = chatMutationTokenStillActive(
@@ -435,6 +453,7 @@ Future<void> durableSend(
           modelId: selectedModel.id,
           modelName: selectedModel.name,
           timestamp: now,
+          metadata: durableIdentity,
         ),
       );
 
@@ -479,10 +498,13 @@ Map<String, dynamic> _buildDurableNewChatBlob({
   required String modelId,
   required String modelName,
   required int now,
+  Map<String, dynamic> metadata = const {},
 }) {
   return <String, dynamic>{
     'title': _titleFromText(text),
     'models': <String>[modelId],
+    if (metadata.isNotEmpty) 'meta': metadata,
+    if (metadata.isNotEmpty) 'metadata': metadata,
     'history': <String, dynamic>{
       'currentId': asstId,
       'messages': <String, dynamic>{
@@ -502,6 +524,7 @@ Map<String, dynamic> _buildDurableNewChatBlob({
           modelId: modelId,
           modelName: modelName,
           timestamp: now,
+          metadata: metadata,
         ),
       },
     },
@@ -514,6 +537,7 @@ Map<String, dynamic> _durableAssistantPayload({
   required String modelId,
   required String modelName,
   required int timestamp,
+  Map<String, dynamic> metadata = const {},
 }) {
   final trimmedModelName = modelName.trim();
   return <String, dynamic>{
@@ -525,6 +549,7 @@ Map<String, dynamic> _durableAssistantPayload({
     'model': modelId,
     if (trimmedModelName.isNotEmpty) 'modelName': trimmedModelName,
     'timestamp': timestamp,
+    if (metadata.isNotEmpty) 'metadata': metadata,
   };
 }
 
