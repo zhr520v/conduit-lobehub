@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:conduit_core/features/lobehub/models/lobe_agent.dart';
 import 'package:conduit_core/features/lobehub/providers/lobehub_agents_provider.dart';
 
+import '../../../shared/theme/color_tokens.dart';
 import '../../../shared/theme/theme_extensions.dart';
 import '../providers/lobehub_chat_start_provider.dart';
 
@@ -736,7 +737,12 @@ Widget buildFallbackAvatar(
     child: Text(
       initial,
       style: TextStyle(
-        color: Colors.white,
+        color: readableOn(
+          bgColor,
+          preferred: theme.textInverse,
+          foreground: theme.textPrimary,
+          background: theme.variant.destructiveForeground,
+        ),
         fontWeight: FontWeight.bold,
         fontSize: size * 0.42,
       ),

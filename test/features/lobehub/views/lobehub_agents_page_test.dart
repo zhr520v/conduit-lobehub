@@ -9,6 +9,8 @@ import 'package:conduit/features/lobehub/views/lobehub_agents_page.dart';
 import 'package:conduit/l10n/app_localizations.dart';
 import 'package:conduit/l10n/conduit_localizations.dart';
 import 'package:conduit/shared/theme/app_theme.dart';
+import 'package:conduit/shared/theme/color_tokens.dart';
+import 'package:conduit/shared/theme/theme_extensions.dart';
 import 'package:conduit/shared/theme/tweakcn_themes.dart';
 import 'package:conduit/shared/widgets/platform_ui/platform_ui.dart';
 
@@ -71,6 +73,7 @@ Widget createTestApp({
   bool isLoading = false,
   String? errorMessage,
   Size size = const Size(390, 844),
+  Brightness brightness = Brightness.light,
 }) {
   PlatformUiCapabilities.debugPlatformOverride = TargetPlatform.android;
   final effectiveAgents = agents ?? _sampleAgents;
@@ -91,7 +94,9 @@ Widget createTestApp({
       lobeHubApiClientProvider.overrideWithValue(null),
     ],
     child: MaterialApp(
-      theme: AppTheme.light(TweakcnThemes.conduit),
+      theme: brightness == Brightness.dark
+          ? AppTheme.dark(TweakcnThemes.conduit)
+          : AppTheme.light(TweakcnThemes.conduit),
       localizationsDelegates: conduitLocalizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
       home: MediaQuery(
@@ -181,6 +186,100 @@ void main() {
   });
 
   group('LobehubAgentsPage - Dynamic Avatar & Fallback Badges', () {
+    const paletteBackgrounds = [
+      Color(0xFF3B82F6),
+      Color(0xFF8B5CF6),
+      Color(0xFFEC4899),
+      Color(0xFFF97316),
+      Color(0xFF10B981),
+      Color(0xFF06B6D4),
+      Color(0xFF6366F1),
+      Color(0xFFE11D48),
+      Color(0xFF14B8A6),
+      Color(0xFFF59E0B),
+    ];
+
+    for (final brightness in Brightness.values) {
+      for (var index = 0; index < paletteBackgrounds.length; index++) {
+        testWidgets(
+          'fallback initials meet AA contrast for palette $index in ${brightness.name}',
+          (tester) async {
+            await tester.pumpWidget(
+              createTestApp(
+                brightness: brightness,
+                child: Builder(
+                  builder: (context) => Center(
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        buildFallbackAvatar(
+                          context.conduitTheme,
+                          ' p$index ',
+                          agentId: 'latin',
+                        ),
+                        buildFallbackAvatar(
+                          context.conduitTheme,
+                          ' 中文助手${(index + 4) % 10} ',
+                          agentId: 'cjk',
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            );
+            await tester.pumpAndSettle();
+
+            for (final entry in {'latin': 'P', 'cjk': '中'}.entries) {
+              final avatarFinder = find.byKey(
+                ValueKey('agent-avatar-fallback-${entry.key}'),
+              );
+              expect(avatarFinder, findsOneWidget);
+              final avatar = tester.widget<Container>(avatarFinder);
+              final decoration = avatar.decoration! as BoxDecoration;
+              final textFinder = find.descendant(
+                of: avatarFinder,
+                matching: find.byType(Text),
+              );
+              expect(textFinder, findsOneWidget);
+              final initial = tester.widget<Text>(textFinder);
+              final theme = tester.element(avatarFinder).conduitTheme;
+              final background = decoration.color!;
+              final ink = initial.style!.color!;
+              final ratio = contrastRatio(ink, background);
+
+              expect(background, paletteBackgrounds[index]);
+              expect(initial.data, entry.value);
+              expect(ink, isIn([
+                theme.textPrimary,
+                theme.textInverse,
+                theme.variant.destructiveForeground,
+              ]));
+              expect(
+                ratio,
+                greaterThanOrEqualTo(4.5),
+                reason: '${brightness.name} palette $index ${entry.key}: '
+                    '${ratio.toStringAsFixed(6)}:1',
+              );
+              expect(tester.getSize(avatarFinder), const Size(44, 44));
+              expect(decoration.shape, BoxShape.circle);
+              expect(decoration.boxShadow, [
+                BoxShadow(
+                  color: background.withValues(alpha: 0.25),
+                  blurRadius: 4,
+                  offset: const Offset(0, 2),
+                ),
+              ]);
+              expect(initial.style!.fontWeight, FontWeight.bold);
+              expect(initial.style!.fontSize, 44 * 0.42);
+            }
+            expect(tester.takeException(), isNull);
+            await tester.pumpWidget(const SizedBox.shrink());
+          },
+        );
+      }
+    }
+
     testWidgets('renders emoji avatar directly for agents with emoji', (
       tester,
     ) async {
