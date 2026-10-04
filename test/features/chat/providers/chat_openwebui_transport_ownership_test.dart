@@ -176,6 +176,8 @@ class _GatedCompletionApi extends ApiService {
     required List<Map<String, dynamic>> messages,
     required String model,
     String? conversationId,
+    String? lobeAgentId,
+    Future<void> Function(LobeAgentCorrelation correlation)? onPreDispatch,
     String? terminalId,
     List<String>? toolIds,
     List<String>? filterIds,

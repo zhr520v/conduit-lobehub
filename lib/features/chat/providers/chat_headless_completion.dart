@@ -31,15 +31,7 @@ Future<void> runQueuedCompletion(
     throw StateError('runQueuedCompletion requires an API service');
   }
   final selectedModel = ref.read(selectedModelProvider);
-  // Empty model => fall back to the selected default model (mirrors the
-  // migrator's empty-model contract). A still-empty model is a hard error.
-  final effectiveModelId = model.isNotEmpty ? model : (selectedModel?.id ?? '');
-  final effectiveModelName = selectedModel?.id == effectiveModelId
-      ? selectedModel?.name
-      : null;
-  if (effectiveModelId.isEmpty) {
-    throw StateError('runQueuedCompletion has no model to send');
-  }
+  final isLobeHub = api is ApiService && api.serverConfig.isLobeHub;
 
   final owner =
       completionOwner ??
@@ -72,6 +64,34 @@ Future<void> runQueuedCompletion(
 
   // Rebuild the conversation history LIVE from the loaded rows (§3.iii).
   final List<ChatMessage> messages = ref.read(chatMessagesProvider);
+  final lobeAgentId = resolveLobeAgentId(activeConversation);
+  final lobeIdentity = isLobeHub
+      ? _queuedLobeHubTurnIdentity(
+          messages: messages,
+          assistantMessageId: assistantMessageId,
+          conversation: activeConversation,
+          model: model,
+          lobeAgentId: lobeAgentId,
+        )
+      : null;
+  final effectiveModelId =
+      lobeIdentity?.modelId ??
+      (model.isNotEmpty ? model : (selectedModel?.id ?? ''));
+  if (effectiveModelId.isEmpty) {
+    throw StateError('runQueuedCompletion has no model to send');
+  }
+  final Model? targetModel = lobeIdentity != null
+      ? await _queuedLobeHubModel(
+          ref,
+          modelId: lobeIdentity.modelId,
+          provider: lobeIdentity.provider,
+          selectedModel: selectedModel,
+          requireOwner: requireActiveOwner,
+        )
+      : selectedModel?.id == effectiveModelId
+      ? selectedModel
+      : null;
+  requireActiveOwner();
   final isTemporary =
       isTemporaryChat(activeConversation.id) ||
       ref.read(temporaryChatEnabledProvider);
@@ -89,19 +109,17 @@ Future<void> runQueuedCompletion(
     ref,
     existingAssistantId: assistantMessageId,
     modelId: effectiveModelId,
-    modelName: effectiveModelName,
+    modelName: targetModel?.name,
   );
   requireActiveOwner();
 
-  final rawModelItem =
-      (selectedModel != null && selectedModel.id == effectiveModelId)
-      ? _buildLocalModelItem(selectedModel)
+  final rawModelItem = targetModel != null
+      ? _buildLocalModelItem(targetModel)
       : <String, dynamic>{'id': effectiveModelId, 'name': effectiveModelId};
   final Map<String, dynamic> modelItem = ensureModelItemProvider(
     modelItem: rawModelItem,
-    selectedModel: selectedModel,
+    selectedModel: isLobeHub ? targetModel : selectedModel,
   );
-  final lobeAgentId = resolveLobeAgentId(activeConversation);
   final onPreDispatch = buildLobeHubAgentPreDispatchCallback(
     ref,
     owner: owner,
@@ -185,8 +203,8 @@ Future<void> runQueuedCompletion(
       responseMessageId: assistantMessageId,
       userSettings: userSettingsData,
       reasoningEffort:
-          selectedModel != null && selectedModel.id == effectiveModelId
-          ? reasoningEffortForModel(ref.read, selectedModel)
+          targetModel != null
+          ? reasoningEffortForModel(ref.read, targetModel)
           : null,
       parentId: parentMsgMap?['parentId']?.toString(),
       userMessage: parentMsgMap,
@@ -328,7 +346,22 @@ Future<void> runHeadlessCompletion(
 
   requireCurrentOwner();
   final selectedModel = ref.read(selectedModelProvider);
-  final effectiveModelId = model.isNotEmpty ? model : (selectedModel?.id ?? '');
+  final lobeAgentId = resolveLobeAgentId(conversation);
+  final isLobeHub = api is ApiService && api.serverConfig.isLobeHub;
+  final lobeIdentity = isLobeHub
+      ? _queuedLobeHubTurnIdentity(
+          messages: messages,
+          assistantMessageId: assistantMessageId,
+          conversation: conversation,
+          model: model,
+          lobeAgentId: lobeAgentId,
+        )
+      : null;
+  final effectiveModelId =
+      lobeIdentity?.modelId ??
+      (model.isNotEmpty
+          ? model
+          : (conversation.model ?? selectedModel?.id ?? ''));
   if (effectiveModelId.isEmpty) {
     throw StateError('runHeadlessCompletion has no model to send');
   }
@@ -359,15 +392,25 @@ Future<void> runHeadlessCompletion(
   );
   requireCurrentOwner();
 
-  final rawModelItem =
-      (selectedModel != null && selectedModel.id == effectiveModelId)
-      ? _buildLocalModelItem(selectedModel)
+  final Model? targetModel = lobeIdentity != null
+      ? await _queuedLobeHubModel(
+          ref,
+          modelId: lobeIdentity.modelId,
+          provider: lobeIdentity.provider,
+          selectedModel: selectedModel,
+          requireOwner: requireCurrentOwner,
+        )
+      : selectedModel?.id == effectiveModelId
+      ? selectedModel
+      : null;
+  requireCurrentOwner();
+  final rawModelItem = targetModel != null
+      ? _buildLocalModelItem(targetModel)
       : <String, dynamic>{'id': effectiveModelId, 'name': effectiveModelId};
   final modelItem = ensureModelItemProvider(
     modelItem: rawModelItem,
-    selectedModel: selectedModel,
+    selectedModel: targetModel,
   );
-  final lobeAgentId = resolveLobeAgentId(conversation);
   final onPreDispatch = buildLobeHubAgentPreDispatchCallback(
     ref,
     owner: owner,
@@ -437,8 +480,8 @@ Future<void> runHeadlessCompletion(
     responseMessageId: assistantMessageId,
     userSettings: userSettingsData,
     reasoningEffort:
-        selectedModel != null && selectedModel.id == effectiveModelId
-        ? reasoningEffortForModel(ref.read, selectedModel)
+        targetModel != null
+        ? reasoningEffortForModel(ref.read, targetModel)
         : null,
     parentId: parentMsgMap?['parentId']?.toString(),
     userMessage: parentMsgMap,
@@ -461,6 +504,104 @@ Future<void> runHeadlessCompletion(
     assistantMessageId: assistantMessageId,
     submissionAlreadyMarked: true,
   );
+}
+
+({String modelId, String provider}) _queuedLobeHubTurnIdentity({
+  required List<ChatMessage> messages,
+  required String assistantMessageId,
+  required Conversation conversation,
+  required String model,
+  required String? lobeAgentId,
+}) {
+  final assistant = messages
+      .where(
+        (message) =>
+            message.id == assistantMessageId && message.role == 'assistant',
+      )
+      .firstOrNull;
+  if (assistant == null) {
+    throw const SyncTerminalException(
+      statusCode: 400,
+      message: 'The queued LobeHub assistant is not loaded. Reopen this conversation before retrying.',
+    );
+  }
+  final configuredModel = lobeAgentId != null
+      ? conversation.metadata['agentModel'] as String?
+      : conversation.metadata['model'] as String? ?? conversation.model;
+  final configuredProvider = conversation.metadata['provider'] as String?;
+  final hasVerifiedConfiguration =
+      conversation.metadata['backend'] == 'lobehub' &&
+      configuredModel != null &&
+      configuredModel.trim().isNotEmpty &&
+      configuredProvider != null &&
+      configuredProvider.trim().isNotEmpty;
+  if (lobeAgentId != null && !hasVerifiedConfiguration) {
+    throw const SyncTerminalException(
+      statusCode: 400,
+      message: 'The queued Agent has no verified model/provider configuration. Reopen this conversation before retrying.',
+    );
+  }
+  final capturedModel =
+      assistant.metadata?['model'] as String? ?? assistant.model;
+  final effectiveModelId =
+      capturedModel ?? (model.isNotEmpty ? model : configuredModel ?? '');
+  if (effectiveModelId.trim().isEmpty ||
+      model.isNotEmpty && model != effectiveModelId) {
+    throw const SyncTerminalException(
+      statusCode: 400,
+      message:
+          'The queued LobeHub model does not match its captured turn identity.',
+    );
+  }
+  final capturedProvider = assistant.metadata?['provider'] as String?;
+  final targetProvider =
+      capturedProvider ??
+      (hasVerifiedConfiguration && effectiveModelId == configuredModel
+          ? configuredProvider
+          : null);
+  if (targetProvider == null || targetProvider.trim().isEmpty) {
+    throw const SyncTerminalException(
+      statusCode: 400,
+      message: 'The queued LobeHub turn has no captured or verified provider. Reopen this conversation before retrying.',
+    );
+  }
+  if (lobeAgentId != null &&
+      (effectiveModelId != configuredModel ||
+          targetProvider != configuredProvider)) {
+    throw const SyncTerminalException(
+      statusCode: 400,
+      message: 'LobeHub REST 2.2.17 does not support per-turn Agent model/provider overrides. Use the verified topic configuration.',
+    );
+  }
+  return (modelId: effectiveModelId, provider: targetProvider);
+}
+
+Future<Model> _queuedLobeHubModel(
+  dynamic ref, {
+  required String modelId,
+  required String provider,
+  required Model? selectedModel,
+  required void Function() requireOwner,
+}) async {
+  if (selectedModel != null &&
+      selectedModel.id == modelId &&
+      resolveModelProvider(selectedModel) == provider) {
+    return selectedModel;
+  }
+  final roster = await ref.read(modelsProvider.future) as List<Model>;
+  requireOwner();
+  final candidates = roster.where(
+    (candidate) =>
+        candidate.id == modelId && resolveModelProvider(candidate) == provider,
+  );
+  if (candidates.length != 1) {
+    throw SyncTerminalException(
+      statusCode: 400,
+      message:
+          'Queued LobeHub model "$modelId" from provider "$provider" is unavailable or ambiguous.',
+    );
+  }
+  return candidates.single;
 }
 
 /// Takes ownership of a completion POST that has already been accepted after
@@ -580,6 +721,78 @@ Future<void> recoverSubmittedOpenWebUiCompletion(
   );
 }
 
+Future<ChatMessage?> settleForegroundLobeHubStreamFailure(
+  dynamic ref, {
+  required OpenWebUiCompletionOwner owner,
+  required ChatMessage partial,
+  required ChatMessage? trailingUser,
+  required Map<String, dynamic> submittedMetadata,
+  required bool Function() ownsSettlement,
+}) async {
+  bool isCurrent() =>
+      ownsSettlement() && openWebUiCompletionContextIsCurrent(ref, owner);
+  if (!isCurrent()) return null;
+  final db = owner.database!;
+  final locks = ref.read(chatLocksProvider) as ChatLocks;
+  final checkpoint = partial.copyWith(
+    metadata: {...?partial.metadata, ...submittedMetadata},
+  );
+  final checkpointSaved = await locks.runExclusive(owner.chatId, () async {
+    if (!isCurrent()) return false;
+    final row = await db.messagesDao.getMessage(owner.chatId, partial.id);
+    if (!isCurrent() || row == null) return false;
+    return db.messagesDao.upsertLocalEchoTurn(
+      chatId: owner.chatId,
+      user: trailingUser == null
+          ? null
+          : localEchoRowForMessage(owner.chatId, trailingUser),
+      assistant: localEchoRowForMessage(owner.chatId, checkpoint),
+    );
+  });
+  if (!isCurrent() || !checkpointSaved) return null;
+
+  ChatMessage? recovered;
+  final landed = await _pullSubmittedOpenWebUiAssistantSnapshot(
+    ref,
+    owner: owner,
+    assistantMessageId: partial.id,
+    ownsRecovery: isCurrent,
+    requireCorrelationBeforePull:
+        submittedMetadata['lobeAgentCorrelation'] is Map,
+    onAssistantSnapshot: (message) => recovered = message,
+  );
+  if (!isCurrent() || landed == null) return null;
+  var result = recovered ?? checkpoint;
+  if (!landed && result.content.isEmpty && checkpoint.content.isNotEmpty) {
+    result = result.copyWith(content: checkpoint.content);
+  }
+  final settled = result.copyWith(
+    isStreaming: false,
+    error: landed
+        ? result.error
+        : const ChatMessageError(
+            content: 'Conduit could not confirm or recover this response from '
+                'LobeHub. Refresh this chat to try again.',
+          ),
+    metadata: {
+      ...?result.metadata,
+      ...submittedMetadata,
+      'responseDone': true,
+    },
+  );
+  final saved = await locks.runExclusive(owner.chatId, () async {
+    if (!isCurrent()) return false;
+    return db.messagesDao.upsertLocalEcho(
+      localEchoRowForMessage(owner.chatId, settled),
+    );
+  });
+  if (!isCurrent() || !saved) return null;
+  ref
+      .read(chatMessagesProvider.notifier)
+      .replaceLastMessageContent(settled.content);
+  return settled;
+}
+
 Future<bool?> _pullSubmittedOpenWebUiCompletion(
   dynamic ref, {
   required OpenWebUiCompletionOwner owner,
@@ -601,9 +814,15 @@ Future<bool?> _pullSubmittedOpenWebUiAssistantSnapshot(
   required String assistantMessageId,
   int attempts = 6,
   Duration delay = const Duration(seconds: 2),
+  bool Function()? ownsRecovery,
+  bool requireCorrelationBeforePull = false,
+  void Function(ChatMessage message)? onAssistantSnapshot,
 }) async {
+  bool isCurrent() =>
+      openWebUiCompletionContextIsCurrent(ref, owner) &&
+      (ownsRecovery?.call() ?? true);
   final chatId = owner.chatId;
-  if (!openWebUiCompletionContextIsCurrent(ref, owner)) {
+  if (!isCurrent()) {
     DebugLogger.log(
       'headless-completion-pull-deferred-backend-changed',
       scope: 'chat/completion',
@@ -612,57 +831,9 @@ Future<bool?> _pullSubmittedOpenWebUiAssistantSnapshot(
     return null;
   }
 
-  // LobeHub submitted recovery: reconcile persisted correlation before pulling
   final db = owner.database;
-  if (db != null) {
-    try {
-      final existingRow = await db.messagesDao.getMessage(
-        owner.chatId,
-        assistantMessageId,
-      );
-      if (existingRow != null) {
-        final payload = _decodeMessagePayload(existingRow.payload);
-        final metadata = _asJsonMap(payload['metadata']);
-        final correlationData = metadata['lobeAgentCorrelation'];
-        if (correlationData != null && correlationData is Map) {
-          final api = owner.api;
-          if (api is ApiService && api.serverConfig.isLobeHub) {
-            final correlation = LobeAgentCorrelation.fromJson(
-              Map<String, dynamic>.from(correlationData),
-            );
-            final reconcileResult = await api.reconcileAgentTurn(correlation);
-            if (reconcileResult.ambiguous) {
-              DebugLogger.error(
-                'LobeHub reconciliation ambiguous for chat $chatId, message $assistantMessageId: ${reconcileResult.errorMessage}',
-                scope: 'chat/completion',
-              );
-              // Ambiguity must visibly fail and NEVER re-POST
-              await db.messagesDao.markAssistantCompletionRecoveryFailed(
-                chatId: owner.chatId,
-                messageId: assistantMessageId,
-                error:
-                    'LobeHub reconciliation ambiguous: ${reconcileResult.errorMessage ?? "multiple matching messages found"}',
-              );
-              return false;
-            }
-            if (!reconcileResult.success) {
-              DebugLogger.log(
-                'LobeHub reconciliation not yet successful: ${reconcileResult.errorMessage}',
-                scope: 'chat/completion',
-              );
-            }
-          }
-        }
-      }
-    } catch (e, st) {
-      DebugLogger.error(
-        'LobeHub correlation reconciliation failed during recovery: $e',
-        scope: 'chat/completion',
-        error: e,
-        stackTrace: st,
-      );
-    }
-  }
+  final api = owner.api;
+  var correlationReconciled = false;
 
   // Pull the chat (bounded) until the server-persisted assistant reply lands
   // locally. The Phase 3 merge applies it under the chat lock. Both transport
@@ -674,18 +845,74 @@ Future<bool?> _pullSubmittedOpenWebUiAssistantSnapshot(
   // the next sync cycle collects it — this only tightens the latency.
   final engine = ref.read(syncEngineProvider.notifier);
   for (var attempt = 0; attempt < attempts; attempt++) {
-    if (!openWebUiCompletionContextIsCurrent(ref, owner)) return null;
+    if (!isCurrent()) return null;
     if (attempt > 0) {
-      if (!openWebUiCompletionContextIsCurrent(ref, owner)) return null;
       await Future<void>.delayed(delay);
-      if (!openWebUiCompletionContextIsCurrent(ref, owner)) return null;
+      if (!isCurrent()) return null;
     }
-    if (!openWebUiCompletionContextIsCurrent(ref, owner)) return null;
+    if (!isCurrent()) return null;
+    if (!correlationReconciled &&
+        db != null &&
+        api is ApiService &&
+        api.serverConfig.isLobeHub) {
+      try {
+        final existingRow = await db.messagesDao.getMessage(
+          chatId,
+          assistantMessageId,
+        );
+        if (!isCurrent()) return null;
+        if (existingRow != null) {
+          final payload = _decodeMessagePayload(existingRow.payload);
+          final metadata = _asJsonMap(payload['metadata']);
+          final correlationData = metadata['lobeAgentCorrelation'];
+          if (correlationData is Map) {
+            final correlation = LobeAgentCorrelation.fromJson(
+              Map<String, dynamic>.from(correlationData),
+            );
+            final reconcileResult = await api.reconcileAgentTurn(correlation);
+            if (!isCurrent()) return null;
+            if (reconcileResult.ambiguous) {
+              DebugLogger.error(
+                'LobeHub reconciliation ambiguous for chat $chatId, message $assistantMessageId: ${reconcileResult.errorMessage}',
+                scope: 'chat/completion',
+              );
+              await db.messagesDao.markAssistantCompletionRecoveryFailed(
+                chatId: chatId,
+                messageId: assistantMessageId,
+                error:
+                    'Conduit could not safely match this response to its '
+                    'LobeHub turn. Refresh this chat to try again.',
+              );
+              if (!isCurrent()) return null;
+              return false;
+            }
+            correlationReconciled = reconcileResult.success;
+            if (!correlationReconciled) {
+              DebugLogger.log(
+                'LobeHub reconciliation not yet successful: ${reconcileResult.errorMessage}',
+                scope: 'chat/completion',
+              );
+            }
+          }
+        }
+      } catch (error, stackTrace) {
+        if (!isCurrent()) return null;
+        DebugLogger.error(
+          'LobeHub correlation reconciliation failed during recovery: $error',
+          scope: 'chat/completion',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+    if (!isCurrent()) return null;
+    if (requireCorrelationBeforePull && !correlationReconciled) continue;
     Conversation? convo;
     try {
       convo = await engine.pullChatNow(chatId);
-      if (!openWebUiCompletionContextIsCurrent(ref, owner)) return null;
+      if (!isCurrent()) return null;
     } catch (error, stackTrace) {
+      if (!isCurrent()) return null;
       DebugLogger.error(
         'headless-completion-pull-failed',
         scope: 'chat/completion',
@@ -698,7 +925,12 @@ Future<bool?> _pullSubmittedOpenWebUiAssistantSnapshot(
     final asst = convo?.messages
         .where((m) => m.id == assistantMessageId)
         .firstOrNull;
-    if (asst != null && _headlessAssistantLanded(asst)) {
+    if (asst == null) continue;
+    onAssistantSnapshot?.call(asst);
+    if (_headlessAssistantLanded(
+      asst,
+      isLobeHub: api is ApiService && api.serverConfig.isLobeHub,
+    )) {
       DebugLogger.log(
         'headless-completion-landed',
         scope: 'chat/completion',
@@ -739,7 +971,16 @@ Future<void> finishSubmittedOpenWebUiCompletionHeadlesslyForTest(
   );
 }
 
-bool _headlessAssistantLanded(ChatMessage message) {
+bool _headlessAssistantLanded(ChatMessage message, {bool isLobeHub = false}) {
+  if (isLobeHub) {
+    return message.error != null ||
+        lobeHubAssistantResultComplete({
+          ...message.toJson(),
+          'model': message.model ?? message.metadata?['model'],
+          'provider': message.metadata?['provider'],
+          if (message.output?.isNotEmpty == true) 'tools': message.output,
+        });
+  }
   if (message.content.trim().isNotEmpty) return true;
   if (message.output?.isNotEmpty == true) return true;
   if (message.files?.isNotEmpty == true) return true;
@@ -753,8 +994,10 @@ bool _headlessAssistantLanded(ChatMessage message) {
 }
 
 @visibleForTesting
-bool headlessAssistantLandedForTest(ChatMessage message) =>
-    _headlessAssistantLanded(message);
+bool headlessAssistantLandedForTest(
+  ChatMessage message, {
+  bool isLobeHub = false,
+}) => _headlessAssistantLanded(message, isLobeHub: isLobeHub);
 
 class _QueuedCompletionDeferred implements OutboxDeferralException {
   const _QueuedCompletionDeferred(this.message);

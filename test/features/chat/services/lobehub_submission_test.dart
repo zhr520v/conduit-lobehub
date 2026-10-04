@@ -218,6 +218,8 @@ void main() {
                   'id': 'srv-asst-new',
                   'role': 'assistant',
                   'content': 'Here is binary search in Dart',
+                  'model': 'gpt-4o',
+                  'provider': 'openai',
                   'parentId': 'srv-user-new',
                   'meta': {'conduitClientId': null},
                 }
@@ -544,6 +546,7 @@ class _TestRecoverySyncEngine extends SyncEngine {
           timestamp: DateTime.now(),
           isStreaming: false,
           model: 'gpt-4o',
+          metadata: {'provider': 'openai'},
         ),
       ],
     );
