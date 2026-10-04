@@ -11,6 +11,7 @@ import 'package:http_parser/http_parser.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:conduit_core/services/chat_completion_transport.dart';
+import 'package:conduit_core/services/sse_frame_scanner.dart';
 
 import 'package:conduit_core/network/io/public_health_probe.dart';
 import 'package:conduit_core/models/account_metadata.dart';
@@ -366,4 +367,251 @@ Map<String, dynamic>? decodeChatResponseEnvelopeWorker(Uint8List bytes) {
   if (decoded is Map<String, dynamic>) return decoded;
   if (decoded is Map) return Map<String, dynamic>.from(decoded);
   return null;
+}
+
+/// Helper to extract raw message list from various LobeHub message response formats.
+List<dynamic> _extractLobeMessagesList(dynamic data) {
+  if (data is Map) {
+    final inner = data['data'];
+    if (inner is Map && inner['messages'] is List) {
+      return inner['messages'] as List;
+    } else if (data['messages'] is List) {
+      return data['messages'] as List;
+    } else if (inner is List) {
+      return inner;
+    }
+  } else if (data is List) {
+    return data;
+  }
+  return const [];
+}
+
+/// Helper to extract raw topics list from various LobeHub topic response formats.
+List<dynamic> _extractLobeTopicsList(dynamic data) {
+  if (data is Map) {
+    final innerData = data['data'];
+    if (innerData is Map && innerData['topics'] is List) {
+      return innerData['topics'] as List;
+    } else if (data['topics'] is List) {
+      return data['topics'] as List;
+    } else if (innerData is List) {
+      return innerData;
+    }
+  } else if (data is List) {
+    return data;
+  }
+  return const [];
+}
+
+int? _parseEpochSeconds(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  if (value is String) {
+    final parsedInt = int.tryParse(value);
+    if (parsedInt != null) return parsedInt;
+    final dt = DateTime.tryParse(value);
+    if (dt != null) return dt.millisecondsSinceEpoch ~/ 1000;
+  }
+  return null;
+}
+
+Future<List<Map<String, dynamic>>> fetchLobeHubTopicListPageRaw(
+  Dio dio, {
+  required int page,
+}) async {
+  final response = await dio.get(
+    '/api/v1/topics',
+    queryParameters: {
+      'page': page,
+      'pageSize': 60,
+    },
+  );
+  final topicsList = _extractLobeTopicsList(response.data);
+  if (topicsList.isEmpty) {
+    return const <Map<String, dynamic>>[];
+  }
+
+  final result = <Map<String, dynamic>>[];
+  for (final topic in topicsList) {
+    if (topic is! Map) continue;
+    final id = topic['id']?.toString() ?? '';
+    if (id.isEmpty) continue;
+    final title = (topic['title'] as String?)?.trim();
+    final effectiveTitle =
+        (title != null && title.isNotEmpty) ? title : 'New Chat';
+    final updatedAt = _parseEpochSeconds(
+          topic['updatedAt'] ?? topic['updated_at'],
+        ) ??
+        DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final createdAt = _parseEpochSeconds(
+          topic['createdAt'] ?? topic['created_at'],
+        ) ??
+        updatedAt;
+    final pinned = topic['favorite'] == true || topic['starred'] == true;
+    final folderId = topic['groupId']?.toString();
+
+    result.add({
+      'id': id,
+      'title': effectiveTitle,
+      'updated_at': updatedAt,
+      'created_at': createdAt,
+      'last_read_at': updatedAt,
+      'pinned': pinned,
+      'folder_id': ?folderId,
+    });
+  }
+  return result;
+}
+
+/// Fetches all pages of messages for [topicId] from LobeHub `/api/v1/messages`.
+Future<List<Map<String, dynamic>>> fetchAllLobeHubMessages(
+  Dio dio, {
+  required String topicId,
+}) async {
+  const pageSize = 100;
+  var page = 1;
+  final allMessages = <Map<String, dynamic>>[];
+  while (true) {
+    final resp = await dio.get(
+      '/api/v1/messages',
+      queryParameters: {
+        'topicId': topicId,
+        'page': page,
+        'pageSize': pageSize,
+      },
+    );
+    final rawList = _extractLobeMessagesList(resp.data);
+    if (rawList.isEmpty) break;
+    var countOnThisPage = 0;
+    for (final item in rawList) {
+      if (item is Map) {
+        allMessages.add(Map<String, dynamic>.from(item));
+        countOnThisPage++;
+      }
+    }
+    if (countOnThisPage < pageSize) {
+      break;
+    }
+    page++;
+    if (page > 100) break;
+  }
+  return allMessages;
+}
+
+Future<Map<String, dynamic>?> fetchLobeHubChatRaw(Dio dio, String id) async {
+  try {
+    final messagesList = await fetchAllLobeHubMessages(dio, topicId: id);
+
+    String title = 'New Chat';
+    int createdAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    int updatedAt = createdAt;
+    bool pinned = false;
+    String? folderId;
+    String? model;
+    String? agentId;
+
+    Map<String, dynamic>? topicObj;
+    if (messagesList.isNotEmpty) {
+      final firstMsg = messagesList.first;
+      if (firstMsg['topic'] is Map) {
+        topicObj = Map<String, dynamic>.from(firstMsg['topic'] as Map);
+      }
+    }
+
+    if (topicObj == null) {
+      try {
+        final topicResp = await dio.get('/api/v1/topics/$id');
+        final tData = topicResp.data;
+        if (tData is Map && tData['data'] is Map) {
+          topicObj = Map<String, dynamic>.from(tData['data'] as Map);
+        } else if (tData is Map) {
+          topicObj = Map<String, dynamic>.from(tData);
+        }
+      } on DioException catch (e) {
+        if (e.response?.statusCode != 404) {
+          rethrow;
+        }
+      }
+    }
+
+    if (topicObj != null) {
+      final tTitle = (topicObj['title'] as String?)?.trim();
+      if (tTitle != null && tTitle.isNotEmpty) {
+        title = tTitle;
+      }
+      createdAt = _parseEpochSeconds(topicObj['createdAt'] ?? topicObj['created_at']) ?? createdAt;
+      updatedAt = _parseEpochSeconds(topicObj['updatedAt'] ?? topicObj['updated_at']) ?? updatedAt;
+      pinned = topicObj['favorite'] == true || topicObj['starred'] == true;
+      folderId = topicObj['groupId']?.toString();
+      model = topicObj['model']?.toString();
+      agentId = topicObj['agentId']?.toString();
+    }
+
+    final messagesMap = <String, Map<String, dynamic>>{};
+    String? currentId;
+
+    for (final m in messagesList) {
+      final mId = m['id']?.toString() ?? '';
+      if (mId.isEmpty) continue;
+      final role = m['role']?.toString() ?? 'user';
+      final content = m['content']?.toString() ?? '';
+      final mCreatedAt = _parseEpochSeconds(m['createdAt'] ?? m['created_at']) ?? createdAt;
+      final mUpdatedAt = _parseEpochSeconds(m['updatedAt'] ?? m['updated_at']) ?? updatedAt;
+      final mModel = m['model']?.toString() ?? model;
+      final reasoning = m['reasoning']?.toString();
+
+      final meta = m['metadata'] is Map
+          ? Map<String, dynamic>.from(m['metadata'] as Map)
+          : (m['meta'] is Map
+              ? Map<String, dynamic>.from(m['meta'] as Map)
+              : <String, dynamic>{});
+      final conduitClientId = meta['conduitClientId']?.toString();
+      final effectiveId = (conduitClientId != null && conduitClientId.isNotEmpty)
+          ? conduitClientId
+          : mId;
+      meta['serverMessageId'] = mId;
+      currentId = effectiveId;
+
+      messagesMap[effectiveId] = {
+        'id': effectiveId,
+        'role': role,
+        'content': content,
+        'timestamp': mCreatedAt,
+        'created_at': mCreatedAt,
+        'updated_at': mUpdatedAt,
+        if (m['parentId'] != null || m['parent_id'] != null)
+          'parentId': (m['parentId'] ?? m['parent_id']).toString(),
+        'childrenIds': ?m['childrenIds'],
+        'model': ?mModel,
+        if (reasoning != null && reasoning.isNotEmpty) 'reasoning': reasoning,
+        'meta': meta,
+        'chatId': id,
+      };
+    }
+
+    return {
+      'id': id,
+      'title': title,
+      'created_at': createdAt,
+      'updated_at': updatedAt,
+      'pinned': pinned,
+      'archived': false,
+      'folder_id': ?folderId,
+      'meta': {
+        'agentId': ?agentId,
+        'model': ?model,
+      },
+      'chat': {
+        'title': title,
+        if (model != null) 'models': [model],
+        'history': {
+          'currentId': ?currentId,
+          'messages': messagesMap,
+        },
+      },
+    };
+  } on DioException catch (e) {
+    if (e.response?.statusCode == 404) return null;
+    rethrow;
+  }
 }

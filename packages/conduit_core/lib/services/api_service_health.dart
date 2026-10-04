@@ -7,8 +7,9 @@ mixin _HealthApi on _ApiServiceBase {
   /// longer touches the pool the completion path uses; this probe does.
   Future<void> warmConnectionPool() async {
     try {
+      final path = serverConfig.isLobeHub ? '/api/v1/health' : '/health';
       await _dio.get<dynamic>(
-        '/health',
+        path,
         options: Options(
           extra: const {'suppressAuthFailureNotification': true},
         ),
@@ -55,9 +56,10 @@ mixin _HealthApi on _ApiServiceBase {
     });
     Response<dynamic>? response;
     try {
+      final healthPath = serverConfig.isLobeHub ? '/api/v1/health' : '/health';
       response = await healthDio
           .get<dynamic>(
-            '/health',
+            healthPath,
             options: Options(
               followRedirects: false,
               responseType: ResponseType.stream,
@@ -137,8 +139,9 @@ mixin _HealthApi on _ApiServiceBase {
     try {
       ServerTlsHttpClientFactory.configureDio(tempDio, serverConfig);
 
+      final healthPath = serverConfig.isLobeHub ? '/api/v1/health' : '/health';
       response = await tempDio.get<dynamic>(
-        '/health',
+        healthPath,
         options: Options(responseType: ResponseType.stream),
       );
       final statusCode = response.statusCode ?? 0;
@@ -282,6 +285,19 @@ mixin _HealthApi on _ApiServiceBase {
   /// Returns `BackendConfig` if the server is valid, `null` otherwise.
   /// This combines server verification and config fetching in a single call.
   Future<BackendConfig?> verifyAndGetConfig() async {
+    if (serverConfig.isLobeHub) {
+      return BackendConfig(
+        serverId: serverConfig.id,
+        enableWebsocket: false,
+        enableWebSearch: false,
+        enableDirectConnections: false,
+        enableMessageRating: false,
+        enableAudioInput: false,
+        enableAudioOutput: false,
+        enableLdap: false,
+        enableLoginForm: false,
+      );
+    }
     try {
       final response = await _dio.get('/api/config');
       if (response.statusCode != 200) {
@@ -314,6 +330,19 @@ mixin _HealthApi on _ApiServiceBase {
   }
 
   Future<BackendConfig?> getBackendConfig() async {
+    if (serverConfig.isLobeHub) {
+      return BackendConfig(
+        serverId: serverConfig.id,
+        enableWebsocket: false,
+        enableWebSearch: false,
+        enableDirectConnections: false,
+        enableMessageRating: false,
+        enableAudioInput: false,
+        enableAudioOutput: false,
+        enableLdap: false,
+        enableLoginForm: false,
+      );
+    }
     try {
       final response = await _dio.get('/api/config');
       final data = response.data;
@@ -355,6 +384,12 @@ mixin _HealthApi on _ApiServiceBase {
   }
 
   Future<ServerAboutInfo> getServerAboutInfo() async {
+    if (serverConfig.isLobeHub) {
+      return ServerAboutInfo(
+        name: serverConfig.name,
+        version: 'LobeHub',
+      );
+    }
     final results = await Future.wait<dynamic>([
       _dio.get('/api/config').then((response) => response.data),
       (() async {

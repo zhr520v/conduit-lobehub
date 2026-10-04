@@ -1,21 +1,27 @@
 part of 'api_service.dart';
 
 mixin _ModelsApi on _ApiServiceBase {
+  bool get _isLobeHub => serverConfig.id == 'lobehub_self_hosted';
+
   // Models
   @override
   Future<List<Model>> getModels({bool includeHidden = false}) async {
     Response? response;
-    try {
+    if (_isLobeHub) {
       response = await _dio.get('/api/v1/models');
-    } catch (_) {
+    } else {
       try {
-        response = await _dio.get('/api/models');
-      } catch (e) {
-        DebugLogger.error(
-          'models-fetch-failed',
-          scope: 'api/models',
-          error: e,
-        );
+        response = await _dio.get('/api/v1/models');
+      } catch (_) {
+        try {
+          response = await _dio.get('/api/models');
+        } catch (e) {
+          DebugLogger.error(
+            'models-fetch-failed',
+            scope: 'api/models',
+            error: e,
+          );
+        }
       }
     }
 
@@ -37,6 +43,18 @@ mixin _ModelsApi on _ApiServiceBase {
     }
 
     final payloadMap = _coerceJsonMap(payload);
+    if (_isLobeHub && payloadMap != null && payloadMap['success'] == false) {
+      final message =
+          payloadMap['message'] ?? payloadMap['error'] ?? 'Unknown error';
+      throw DioException(
+        requestOptions: response.requestOptions,
+        response: response,
+        type: DioExceptionType.badResponse,
+        error: message,
+        message: 'LobeHub models fetch failed: $message',
+      );
+    }
+
     List<dynamic>? rawModels;
     if (payloadMap != null) {
       final innerData = _coerceJsonMap(payloadMap['data']);
@@ -54,6 +72,15 @@ mixin _ModelsApi on _ApiServiceBase {
         scope: 'api/models',
         data: {'type': payload.runtimeType},
       );
+      if (_isLobeHub) {
+        throw DioException(
+          requestOptions: response.requestOptions,
+          response: response,
+          type: DioExceptionType.badResponse,
+          error: 'Invalid LobeHub models response format',
+          message: 'Invalid LobeHub models response format',
+        );
+      }
       return const [];
     }
 
@@ -62,16 +89,103 @@ mixin _ModelsApi on _ApiServiceBase {
     for (final raw in rawModels) {
       try {
         if (raw is String) {
-          models.add(Model(id: raw, name: raw, supportsStreaming: true));
+          models.add(Model(
+            id: raw,
+            name: raw,
+            supportsStreaming: _isLobeHub ? false : true,
+          ));
           continue;
         }
         if (raw is Map) {
           final normalized = raw.map(
             (key, value) => MapEntry(key.toString(), value),
           );
-          if (normalized['name'] == null && normalized['displayName'] != null) {
-            normalized['name'] = normalized['displayName'];
+
+          final providerId = (normalized['providerId'] ??
+                  normalized['provider_id'] ??
+                  normalized['provider'] ??
+                  normalized['owned_by'])
+              ?.toString();
+          final displayName = (normalized['displayName'] ??
+                  normalized['display_name'] ??
+                  normalized['name'])
+              ?.toString();
+          final modelId = (normalized['id'] ??
+                  normalized['model_id'] ??
+                  normalized['modelId'])
+              ?.toString();
+
+          if (_isLobeHub) {
+            normalized['supportsStreaming'] = false;
+            normalized['supports_streaming'] = false;
+            if (providerId != null && providerId.isNotEmpty) {
+              normalized['owned_by'] ??= providerId;
+              normalized['provider'] ??= providerId;
+              normalized['providerId'] ??= providerId;
+            }
+            if (displayName != null && displayName.isNotEmpty) {
+              normalized['name'] ??= displayName;
+              normalized['displayName'] ??= displayName;
+            }
+            if (modelId != null && modelId.isNotEmpty) {
+              normalized['id'] = modelId;
+            }
+
+            final abilities = normalized['abilities'];
+            if (abilities is Map) {
+              if (abilities['vision'] == true) {
+                normalized['isMultimodal'] ??= true;
+                normalized['is_multimodal'] ??= true;
+              }
+              if (normalized['capabilities'] == null) {
+                normalized['capabilities'] =
+                    Map<String, dynamic>.from(abilities);
+              }
+            }
+            if (normalized['contextWindowTokens'] != null) {
+              normalized['context_length'] ??=
+                  normalized['contextWindowTokens'];
+            }
+            if (normalized['enabled'] == false) {
+              normalized['hidden'] ??= true;
+            }
+          } else {
+            if (normalized['name'] == null &&
+                normalized['displayName'] != null) {
+              normalized['name'] = normalized['displayName'];
+            }
           }
+
+          final existingMeta = (normalized['metadata'] is Map)
+              ? Map<String, dynamic>.from(normalized['metadata'] as Map)
+              : <String, dynamic>{};
+          if (providerId != null && providerId.isNotEmpty) {
+            existingMeta['provider'] ??= providerId;
+            existingMeta['providerId'] ??= providerId;
+            existingMeta['provider_id'] ??= providerId;
+            existingMeta['owned_by'] ??= providerId;
+          }
+          if (displayName != null && displayName.isNotEmpty) {
+            existingMeta['displayName'] ??= displayName;
+            existingMeta['display_name'] ??= displayName;
+          }
+          if (modelId != null && modelId.isNotEmpty) {
+            existingMeta['modelId'] ??= modelId;
+            existingMeta['id'] ??= modelId;
+          }
+          if (_isLobeHub) {
+            if (normalized['type'] != null) {
+              existingMeta['type'] ??= normalized['type'];
+            }
+            if (normalized['source'] != null) {
+              existingMeta['source'] ??= normalized['source'];
+            }
+            if (normalized['sort'] != null) {
+              existingMeta['sort'] ??= normalized['sort'];
+            }
+          }
+          normalized['metadata'] = existingMeta;
+
           final model = Model.fromJson(normalized);
           if (model.isHidden) {
             hiddenModelCount++;
@@ -98,40 +212,6 @@ mixin _ModelsApi on _ApiServiceBase {
       }
     }
 
-    // Also include custom agents from LobeHub /api/v1/agents as selectable models
-    try {
-      final agentsResponse = await _dio.get('/api/v1/agents');
-      final agentsPayload = agentsResponse.data;
-      final agentsMap = _coerceJsonMap(agentsPayload);
-      final innerAgents = _coerceJsonMap(agentsMap?['data']);
-      final rawAgents = _asListOrNull(innerAgents?['agents']) ??
-          _asListOrNull(agentsMap?['data']) ??
-          _asListOrNull(agentsMap?['agents']) ??
-          _asListOrNull(agentsPayload);
-      if (rawAgents != null) {
-        for (final raw in rawAgents) {
-          if (raw is Map) {
-            final id = raw['id']?.toString();
-            final title = raw['title']?.toString() ??
-                raw['name']?.toString() ??
-                id;
-            if (id != null && id.isNotEmpty && !models.any((m) => m.id == id)) {
-              models.add(Model(
-                id: id,
-                name: title ?? id,
-                description: raw['description']?.toString(),
-                supportsStreaming: true,
-                metadata: const {
-                  'owned_by': 'lobehub-agent',
-                  'source': 'lobehub-agent',
-                },
-              ));
-            }
-          }
-        }
-      }
-    } catch (_) {}
-
     DebugLogger.log(
       'models-count',
       scope: 'api/models',
@@ -142,6 +222,11 @@ mixin _ModelsApi on _ApiServiceBase {
 
   // Get default model configuration from OpenWebUI user settings
   Future<String?> getDefaultModel() async {
+    if (_isLobeHub) {
+      final models = await getModels();
+      return models.isNotEmpty ? models.first.id : null;
+    }
+
     try {
       final settings = await getServerUserSettingsModel();
       final defaultModel = settings.defaultModelId;
@@ -188,6 +273,16 @@ mixin _ModelsApi on _ApiServiceBase {
 
   // Get detailed model information
   Future<Map<String, dynamic>?> getModelDetails(String modelId) async {
+    if (_isLobeHub) {
+      final models = await getModels(includeHidden: true);
+      for (final model in models) {
+        if (model.id == modelId) {
+          return model.toJson();
+        }
+      }
+      return null;
+    }
+
     try {
       final response = await _dio.get(
         '/api/v1/models/model',
@@ -206,6 +301,8 @@ mixin _ModelsApi on _ApiServiceBase {
   }
 
   Future<Map<String, dynamic>?> updateModel(Map<String, dynamic> model) async {
+    if (_isLobeHub) return null;
+
     final payload = <String, dynamic>{
       'id': model['id'],
       'base_model_id': model['base_model_id'],
@@ -229,6 +326,10 @@ mixin _ModelsApi on _ApiServiceBase {
     String modelId,
     String? systemPrompt,
   ) async {
+    if (_isLobeHub) {
+      throw StateError('Model "$modelId" has no editable server record.');
+    }
+
     final model = await getModelDetails(modelId);
     if (model == null) {
       throw StateError('Model "$modelId" has no editable server record.');
@@ -257,6 +358,10 @@ mixin _ModelsApi on _ApiServiceBase {
     String? direction,
     int page = 1,
   }) async {
+    if (_isLobeHub) {
+      return const WorkspacePagedResponse(items: [], total: 0);
+    }
+
     final response = await _dio.get(
       '/api/v1/models/list',
       queryParameters: _workspaceListQuery(
@@ -275,6 +380,8 @@ mixin _ModelsApi on _ApiServiceBase {
   }
 
   Future<WorkspaceModelDetail?> getWorkspaceModel(String id) async {
+    if (_isLobeHub) return null;
+
     final response = await _dio.get(
       '/api/v1/models/model',
       queryParameters: {'id': id},
@@ -289,6 +396,8 @@ mixin _ModelsApi on _ApiServiceBase {
   Future<WorkspaceModelDetail?> createWorkspaceModel(
     WorkspaceModelForm form,
   ) async {
+    if (_isLobeHub) return null;
+
     final response = await _dio.post(
       '/api/v1/models/create',
       data: form.toJson(),
@@ -303,6 +412,8 @@ mixin _ModelsApi on _ApiServiceBase {
   Future<WorkspaceModelDetail?> updateWorkspaceModel(
     WorkspaceModelForm form,
   ) async {
+    if (_isLobeHub) return null;
+
     final response = await _dio.post(
       '/api/v1/models/model/update',
       data: form.toJson(),
@@ -319,6 +430,8 @@ mixin _ModelsApi on _ApiServiceBase {
     String name,
     List<WorkspaceAccessGrantInput> grants,
   ) async {
+    if (_isLobeHub) return null;
+
     final response = await _dio.post(
       '/api/v1/models/model/access/update',
       data: {
@@ -335,6 +448,8 @@ mixin _ModelsApi on _ApiServiceBase {
   }
 
   Future<List<WorkspaceModelDetail>> exportWorkspaceModels() async {
+    if (_isLobeHub) return const [];
+
     final response = await _dio.get('/api/v1/models/export');
     return workspaceJsonList(response.data)
         .map(WorkspaceModelSummary.fromJson)
@@ -342,6 +457,8 @@ mixin _ModelsApi on _ApiServiceBase {
   }
 
   Future<bool> importWorkspaceModels(List<Map<String, dynamic>> models) async {
+    if (_isLobeHub) return false;
+
     final response = await _dio.post(
       '/api/v1/models/import',
       data: {'models': models},
@@ -350,6 +467,8 @@ mixin _ModelsApi on _ApiServiceBase {
   }
 
   Future<List<WorkspaceModelDetail>> syncWorkspaceModels() async {
+    if (_isLobeHub) return const [];
+
     final response = await _dio.post('/api/v1/models/sync');
     return workspaceJsonList(response.data)
         .map(WorkspaceModelSummary.fromJson)
@@ -360,6 +479,8 @@ mixin _ModelsApi on _ApiServiceBase {
   /// serves these at `/api/v1/models/base` (the raw connections/pipelines,
   /// distinct from the user-facing `/models/list`).
   Future<List<WorkspaceModelSummary>> getWorkspaceBaseModels() async {
+    if (_isLobeHub) return const [];
+
     final response = await _dio.get('/api/v1/models/base');
     return workspaceJsonList(response.data)
         .map(WorkspaceModelSummary.fromJson)
@@ -370,6 +491,8 @@ mixin _ModelsApi on _ApiServiceBase {
   /// `/api/v1/models/model/profile/image` endpoint. Returns null when the
   /// server has no stored image (or serves a redirect to a remote URL).
   Future<List<int>?> getWorkspaceModelProfileImage(String id) async {
+    if (_isLobeHub) return null;
+
     try {
       final response = await _dio.get<List<int>>(
         '/api/v1/models/model/profile/image',
@@ -388,6 +511,8 @@ mixin _ModelsApi on _ApiServiceBase {
   }
 
   Future<WorkspaceModelDetail?> toggleWorkspaceModel(String id) async {
+    if (_isLobeHub) return null;
+
     final response = await _dio.post(
       '/api/v1/models/model/toggle',
       queryParameters: {'id': id},
@@ -400,6 +525,8 @@ mixin _ModelsApi on _ApiServiceBase {
   }
 
   Future<bool> deleteWorkspaceModel(String id) async {
+    if (_isLobeHub) return false;
+
     final response = await _dio.post(
       '/api/v1/models/model/delete',
       data: {'id': id},

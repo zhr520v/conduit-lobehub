@@ -9,6 +9,9 @@ mixin _NotesApi on _ApiServiceBase {
   /// Returns a record with (notes data, feature enabled flag).
   /// When the notes feature is disabled server-side (403), returns ([], false).
   Future<(List<Map<String, dynamic>>, bool)> getNotes({int? page}) async {
+    if (serverConfig.isLobeHub) {
+      return (const <Map<String, dynamic>>[], false);
+    }
     try {
       _traceApi('Fetching notes${page == null ? '' : ', page: $page'}');
       final queryParams = <String, dynamic>{};
@@ -60,6 +63,9 @@ mixin _NotesApi on _ApiServiceBase {
     String? query,
     int? page,
   }) async {
+    if (serverConfig.isLobeHub) {
+      return const <Map<String, dynamic>>[];
+    }
     _traceApi('Searching notes: $query');
     final queryParams = <String, dynamic>{};
     if (query != null && query.isNotEmpty) {
@@ -87,6 +93,9 @@ mixin _NotesApi on _ApiServiceBase {
 
   /// Get a single note by ID
   Future<Map<String, dynamic>> getNoteById(String id) async {
+    if (serverConfig.isLobeHub) {
+      throw UnsupportedError('Notes are not supported on LobeHub');
+    }
     _traceApi('Fetching note: $id');
     final response = await _dio.get('/api/v1/notes/$id');
     return response.data as Map<String, dynamic>;
@@ -99,6 +108,9 @@ mixin _NotesApi on _ApiServiceBase {
     Map<String, dynamic>? meta,
     Map<String, dynamic>? accessControl,
   }) async {
+    if (serverConfig.isLobeHub) {
+      throw UnsupportedError('Notes are not supported on LobeHub');
+    }
     _traceApi('Creating note: $title');
     final response = await _dio.post(
       '/api/v1/notes/create',
@@ -135,6 +147,9 @@ mixin _NotesApi on _ApiServiceBase {
     ApiAuthSnapshot? authSnapshot,
     CancelToken? cancelToken,
   }) async {
+    if (serverConfig.isLobeHub) {
+      throw UnsupportedError('Notes are not supported on LobeHub');
+    }
     _traceApi('Updating note: $id');
     final response = await _dio.post(
       '/api/v1/notes/$id/update',
@@ -152,6 +167,9 @@ mixin _NotesApi on _ApiServiceBase {
 
   /// Toggle a note's pinned state.
   Future<Map<String, dynamic>> toggleNotePinned(String id) async {
+    if (serverConfig.isLobeHub) {
+      throw UnsupportedError('Notes are not supported on LobeHub');
+    }
     _traceApi('Toggling note pin state: $id');
     final response = await _dio.post('/api/v1/notes/$id/pin');
     return response.data as Map<String, dynamic>;
@@ -159,6 +177,9 @@ mixin _NotesApi on _ApiServiceBase {
 
   /// Delete a note by ID
   Future<bool> deleteNote(String id) async {
+    if (serverConfig.isLobeHub) {
+      return false;
+    }
     _traceApi('Deleting note: $id');
     final response = await _dio.delete('/api/v1/notes/$id/delete');
     return response.data == true;
@@ -172,6 +193,7 @@ mixin _NotesApi on _ApiServiceBase {
   /// GET `/api/v1/notes/{id}` — the FULL (untruncated) note map; null on 404;
   /// malformed 2xx bodies throw; 401/403 -> [SyncTerminalException].
   Future<Map<String, dynamic>?> getNoteRaw(String id) async {
+    if (serverConfig.isLobeHub) return null;
     try {
       final response = await _dio.get('/api/v1/notes/$id');
       return _requireResponseMap(response.data, 'getNoteRaw $id');
@@ -195,6 +217,12 @@ mixin _NotesApi on _ApiServiceBase {
     required Map<String, dynamic> data,
     Map<String, dynamic>? meta,
   }) async {
+    if (serverConfig.isLobeHub) {
+      throw const SyncTerminalException(
+        statusCode: 404,
+        message: 'createNote forbidden on LobeHub',
+      );
+    }
     try {
       final response = await _dio.post(
         '/api/v1/notes/create',
@@ -219,6 +247,7 @@ mixin _NotesApi on _ApiServiceBase {
     String id,
     Map<String, dynamic> patch,
   ) async {
+    if (serverConfig.isLobeHub) return null;
     try {
       final response = await _dio.post('/api/v1/notes/$id/update', data: patch);
       return _requireResponseMap(response.data, 'updateNoteRaw $id');
@@ -238,6 +267,7 @@ mixin _NotesApi on _ApiServiceBase {
   /// DELETE `/api/v1/notes/{id}/delete`. `true` on success; 404 -> `false`
   /// (already gone, no throw); 401/403 -> [SyncTerminalException].
   Future<bool> deleteNoteRaw(String id) async {
+    if (serverConfig.isLobeHub) return false;
     try {
       final response = await _dio.delete('/api/v1/notes/$id/delete');
       return response.data == true;
@@ -263,6 +293,7 @@ mixin _NotesApi on _ApiServiceBase {
   /// Returns the note map after the flip; null on 404; 401/403 ->
   /// [SyncTerminalException].
   Future<Map<String, dynamic>?> togglePinNoteRaw(String id) async {
+    if (serverConfig.isLobeHub) return null;
     try {
       final response = await _dio.post('/api/v1/notes/$id/pin');
       return _requireResponseMap(response.data, 'togglePinNoteRaw $id');
@@ -284,6 +315,7 @@ mixin _NotesApi on _ApiServiceBase {
     String content, {
     required String modelId,
   }) async {
+    if (serverConfig.isLobeHub) return null;
     _traceApi('Generating title for note content with model: $modelId');
 
     final prompt =
@@ -350,6 +382,7 @@ $content
     String content, {
     required String modelId,
   }) async {
+    if (serverConfig.isLobeHub) return null;
     _traceApi('Enhancing note content with AI, model: $modelId');
 
     const systemPrompt = '''Enhance existing notes using the content's primary language. Your task is to make the notes more useful and comprehensive.

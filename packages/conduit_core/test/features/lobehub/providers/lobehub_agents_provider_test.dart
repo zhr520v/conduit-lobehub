@@ -451,7 +451,11 @@ void main() {
     });
 
     test('handles missing client gracefully with offline error', () async {
-      final container = ProviderContainer();
+      final container = ProviderContainer(
+        overrides: [
+          lobeHubApiClientProvider.overrideWithValue(null),
+        ],
+      );
       addTearDown(container.dispose);
 
       final notifier = container.read(lobeAgentsProvider.notifier);

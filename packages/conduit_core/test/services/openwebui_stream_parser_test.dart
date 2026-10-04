@@ -554,6 +554,216 @@ void main() {
       check(updates[5]).isA<OpenWebUIStreamDone>();
     });
 
+    test('parses named response.* events when payload omits type', () async {
+      final updates = await parseOpenWebUIStream(
+        Stream<List<int>>.fromIterable([
+          utf8.encode(
+            'event: response.output_item.added\ndata: {"item":{"id":"item_1"}}\n\n',
+          ),
+          utf8.encode(
+            'event: response.output_text.delta\ndata: {"delta":"hello"}\n\n',
+          ),
+          utf8.encode(
+            'event: response.output_item.done\ndata: {"item":{"id":"item_1"}}\n\n',
+          ),
+          utf8.encode(
+            'event: response.completed\ndata: {"response":{"output":[],"usage":{"total_tokens":5}}}\n\n',
+          ),
+        ]),
+      ).toList();
+
+      check(updates).has((it) => it.length, 'length').equals(6);
+      check(updates[0])
+          .isA<OpenWebUIResponseStreamEvent>()
+          .has((u) => u.type, 'type')
+          .equals('response.output_item.added');
+      check(updates[1])
+          .isA<OpenWebUIResponseStreamEvent>()
+          .has((u) => u.type, 'type')
+          .equals('response.output_text.delta');
+      check(updates[2])
+          .isA<OpenWebUIResponseStreamEvent>()
+          .has((u) => u.type, 'type')
+          .equals('response.output_item.done');
+      check(updates[3])
+          .isA<OpenWebUIResponseStreamEvent>()
+          .has((u) => u.type, 'type')
+          .equals('response.completed');
+      check(updates[4])
+          .isA<OpenWebUIUsageUpdate>()
+          .has((u) => u.usage['total_tokens'], 'total_tokens')
+          .equals(5);
+      check(updates[5]).isA<OpenWebUIStreamDone>();
+    });
+
+    test('output_item.done does not finish stream and lets subsequent frames flow', () async {
+      final updates = await parseOpenWebUIStream(
+        Stream<List<int>>.fromIterable([
+          utf8.encode(
+            'event: response.output_item.done\ndata: {"item":{"id":"item_tool"}}\n\n',
+          ),
+          utf8.encode(
+            'event: response.output_text.delta\ndata: {"delta":"after done"}\n\n',
+          ),
+          utf8.encode('data: [DONE]\n\n'),
+        ]),
+      ).toList();
+
+      check(updates).has((it) => it.length, 'length').equals(3);
+      check(updates[0])
+          .isA<OpenWebUIResponseStreamEvent>()
+          .has((u) => u.type, 'type')
+          .equals('response.output_item.done');
+      check(updates[1])
+          .isA<OpenWebUIResponseStreamEvent>()
+          .has((u) => u.type, 'type')
+          .equals('response.output_text.delta');
+      check(updates[2]).isA<OpenWebUIStreamDone>();
+    });
+
+    test('response.failed is treated as terminal event without [DONE]', () async {
+      final updates = await parseOpenWebUIStream(
+        Stream<List<int>>.fromIterable([
+          utf8.encode(
+            'event: response.failed\ndata: {"error":{"message":"stream aborted"}}\n\n',
+          ),
+        ]),
+      ).toList();
+
+      check(updates).has((it) => it.length, 'length').equals(2);
+      check(updates[0])
+          .isA<OpenWebUIResponseStreamEvent>()
+          .has((u) => u.type, 'type')
+          .equals('response.failed');
+      check(updates[1]).isA<OpenWebUIStreamDone>();
+    });
+
+    test('response.completed with failed status delivers error and ends turn', () async {
+      final updates = await parseOpenWebUIStream(
+        Stream<List<int>>.fromIterable([
+          utf8.encode(
+            'event: response.completed\ndata: {"response":{"status":"failed","error":{"message":"Quota exceeded"},"usage":{"total_tokens":2}}}\n\n',
+          ),
+        ]),
+      ).toList();
+
+      check(updates).has((it) => it.length, 'length').equals(4);
+      check(updates[0])
+          .isA<OpenWebUIResponseStreamEvent>()
+          .has((u) => u.type, 'type')
+          .equals('response.completed');
+      check(updates[1])
+          .isA<OpenWebUIUsageUpdate>()
+          .has((u) => u.usage['total_tokens'], 'total_tokens')
+          .equals(2);
+      check(updates[2])
+          .isA<OpenWebUIErrorUpdate>()
+          .has((u) => u.error['message'], 'error message')
+          .equals('Quota exceeded');
+      check(updates[3]).isA<OpenWebUIStreamDone>();
+    });
+
+    test('response.incomplete ends turn with usage', () async {
+      final updates = await parseOpenWebUIStream(
+        Stream<List<int>>.fromIterable([
+          utf8.encode(
+            'event: response.incomplete\ndata: {"response":{"usage":{"total_tokens":10}}}\n\n',
+          ),
+        ]),
+      ).toList();
+
+      check(updates).has((it) => it.length, 'length').equals(3);
+      check(updates[0])
+          .isA<OpenWebUIResponseStreamEvent>()
+          .has((u) => u.type, 'type')
+          .equals('response.incomplete');
+      check(updates[1])
+          .isA<OpenWebUIUsageUpdate>()
+          .has((u) => u.usage['total_tokens'], 'total_tokens')
+          .equals(10);
+      check(updates[2]).isA<OpenWebUIStreamDone>();
+    });
+
+    test('response.completed with status_details or string error is guarded', () async {
+      final updates1 = await parseOpenWebUIStream(
+        Stream<List<int>>.fromIterable([
+          utf8.encode(
+            'event: response.completed\ndata: {"response":{"status":"failed","status_details":{"error":{"code":"context_length_exceeded"}}}}\n\n',
+          ),
+        ]),
+      ).toList();
+
+      check(updates1).has((it) => it.length, 'length').equals(3);
+      check(updates1[1])
+          .isA<OpenWebUIErrorUpdate>()
+          .has((u) => u.error['code'], 'error code')
+          .equals('context_length_exceeded');
+
+      final updates2 = await parseOpenWebUIStream(
+        Stream<List<int>>.fromIterable([
+          utf8.encode(
+            'event: response.completed\ndata: {"response":{"status":"failed","error":"server timeout"}}\n\n',
+          ),
+        ]),
+      ).toList();
+
+      check(updates2).has((it) => it.length, 'length').equals(3);
+      check(updates2[1])
+          .isA<OpenWebUIErrorUpdate>()
+          .has((u) => u.error['message'], 'error message')
+          .equals('server timeout');
+    });
+
+    test('named event does not duplicate updates when payload already has type', () async {
+      final updates = await parseOpenWebUIStream(
+        Stream<List<int>>.fromIterable([
+          utf8.encode(
+            'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"once"}\n\n',
+          ),
+          utf8.encode('data: [DONE]\n\n'),
+        ]),
+      ).toList();
+
+      check(updates).has((it) => it.length, 'length').equals(2);
+      check(updates[0])
+          .isA<OpenWebUIResponseStreamEvent>()
+          .has((u) => u.type, 'type')
+          .equals('response.output_text.delta');
+      check(updates[1]).isA<OpenWebUIStreamDone>();
+    });
+
+    test('strict malformed payload errors are preserved for named events', () async {
+      final stream = parseOpenWebUIStream(
+        Stream<List<int>>.fromIterable([
+          utf8.encode('event: response.output_text.delta\ndata: not json\n\n'),
+        ]),
+      );
+
+      await expectLater(
+        stream.toList(),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('strict malformed payload errors are preserved for non-object JSON', () async {
+      final stream = parseOpenWebUIStream(
+        Stream<List<int>>.fromIterable([
+          utf8.encode('event: response.output_text.delta\ndata: "plain string"\n\n'),
+        ]),
+      );
+
+      await expectLater(
+        stream.toList(),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('must decode to a JSON object'),
+          ),
+        ),
+      );
+    });
+
     test('parses provider reasoning keys passed through by the server', () async {
       // Open WebUI relays provider chunks unchanged on the SSE path. OpenRouter
       // and gateway providers use `reasoning` (plus `reasoning_details`) and

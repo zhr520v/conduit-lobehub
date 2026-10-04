@@ -5,6 +5,9 @@ mixin _FoldersTagsApi on _ApiServiceBase {
   /// Returns a record with (folders data, feature enabled flag).
   /// When the folders feature is disabled server-side (403), returns ([], false).
   Future<(List<Map<String, dynamic>>, bool)> getFolders() async {
+    if (serverConfig.isLobeHub) {
+      return (const <Map<String, dynamic>>[], false);
+    }
     try {
       final response = await _dio.get('/api/v1/folders/');
       DebugLogger.log(
@@ -50,6 +53,9 @@ mixin _FoldersTagsApi on _ApiServiceBase {
   /// folder are included by the server. Returns `[]` on 403 (feature off) and
   /// 404 (server predates the route).
   Future<List<Map<String, dynamic>>> getSharedFolders() async {
+    if (serverConfig.isLobeHub) {
+      return const <Map<String, dynamic>>[];
+    }
     try {
       final response = await _dio.get('/api/v1/folders/shared');
       return _coerceRawMapList(response.data);
@@ -76,6 +82,9 @@ mixin _FoldersTagsApi on _ApiServiceBase {
     String folderId, {
     required int page,
   }) async {
+    if (serverConfig.isLobeHub) {
+      return (const <Map<String, dynamic>>[], false);
+    }
     final response = await _dio.get(
       '/api/v1/folders/${Uri.encodeComponent(folderId)}/shared/chats',
       queryParameters: {'page': page},
@@ -96,6 +105,9 @@ mixin _FoldersTagsApi on _ApiServiceBase {
     String folderId, {
     int maxPages = 50,
   }) async {
+    if (serverConfig.isLobeHub) {
+      return const <Map<String, dynamic>>[];
+    }
     final all = <Map<String, dynamic>>[];
     for (var page = 1; page <= maxPages; page++) {
       final (chats, hasMore) = await getSharedFolderChatsPage(
@@ -114,6 +126,9 @@ mixin _FoldersTagsApi on _ApiServiceBase {
     Map<String, dynamic>? data,
     Map<String, dynamic>? meta,
   }) async {
+    if (serverConfig.isLobeHub) {
+      throw UnsupportedError('Folders are not supported on LobeHub');
+    }
     _traceApi('Creating folder: $name');
     final response = await _dio.post(
       '/api/v1/folders/',
@@ -128,6 +143,7 @@ mixin _FoldersTagsApi on _ApiServiceBase {
   }
 
   Future<Map<String, dynamic>?> getFolderById(String id) async {
+    if (serverConfig.isLobeHub) return null;
     _traceApi('Fetching folder: $id');
     final response = await _dio.get('/api/v1/folders/$id');
     final data = response.data;
@@ -140,6 +156,7 @@ mixin _FoldersTagsApi on _ApiServiceBase {
     Map<String, dynamic>? data,
     Map<String, dynamic>? meta,
   }) async {
+    if (serverConfig.isLobeHub) return null;
     _traceApi('Updating folder: $id');
     final payload = <String, dynamic>{
       'name': ?name,
@@ -158,6 +175,7 @@ mixin _FoldersTagsApi on _ApiServiceBase {
   }
 
   Future<void> updateFolderParent(String id, String? parentId) async {
+    if (serverConfig.isLobeHub) return;
     _traceApi('Updating folder parent: $id -> $parentId');
     await _dio.post(
       '/api/v1/folders/$id/update/parent',
@@ -166,6 +184,7 @@ mixin _FoldersTagsApi on _ApiServiceBase {
   }
 
   Future<void> deleteFolder(String id) async {
+    if (serverConfig.isLobeHub) return;
     _traceApi('Deleting folder: $id');
     await _dio.delete('/api/v1/folders/$id');
   }
@@ -174,6 +193,7 @@ mixin _FoldersTagsApi on _ApiServiceBase {
     String conversationId,
     String? folderId,
   ) async {
+    if (serverConfig.isLobeHub) return;
     _traceApi('Moving conversation $conversationId to folder $folderId');
     await _dio.post(
       '/api/v1/chats/$conversationId/folder',
@@ -188,6 +208,9 @@ mixin _FoldersTagsApi on _ApiServiceBase {
 
   /// GET `/api/v1/chats/all/tags`: every tag this user has.
   Future<List<Map<String, dynamic>>> getAllChatTags() async {
+    if (serverConfig.isLobeHub) {
+      return const <Map<String, dynamic>>[];
+    }
     final response = await _dio.get('/api/v1/chats/all/tags');
     return _coerceRawMapList(response.data);
   }
@@ -198,6 +221,9 @@ mixin _FoldersTagsApi on _ApiServiceBase {
     String chatId,
     String name,
   ) async {
+    if (serverConfig.isLobeHub) {
+      return const <Map<String, dynamic>>[];
+    }
     final response = await _dio.post(
       '/api/v1/chats/$chatId/tags',
       data: {'name': name},
@@ -211,6 +237,9 @@ mixin _FoldersTagsApi on _ApiServiceBase {
     String chatId,
     String name,
   ) async {
+    if (serverConfig.isLobeHub) {
+      return const <Map<String, dynamic>>[];
+    }
     final response = await _dio.delete(
       '/api/v1/chats/$chatId/tags',
       data: {'name': name},
@@ -224,6 +253,9 @@ mixin _FoldersTagsApi on _ApiServiceBase {
     String name, {
     int limit = 50,
   }) async {
+    if (serverConfig.isLobeHub) {
+      return const <Map<String, dynamic>>[];
+    }
     final response = await _dio.post(
       '/api/v1/chats/tags',
       data: {'name': name, 'skip': 0, 'limit': limit},

@@ -19,6 +19,7 @@ import 'structured_output_renderer.dart';
 /// can be executed inside a background worker.
 
 const _uuid = Uuid();
+const _knownLobeMetadataKeys = <String>{'backend', 'agentId', 'provider'};
 
 Map<String, dynamic> parseConversationSummary(Map<String, dynamic> chatData) {
   final id = (chatData['id'] ?? '').toString();
@@ -189,6 +190,47 @@ Map<String, dynamic> parseFullConversation(Map<String, dynamic> chatData) {
     }
   }
 
+  final existingTopMetadata = _coerceJsonMap(chatData['metadata']);
+  final topLevelMeta = _coerceJsonMap(chatData['meta']);
+  final blobMetadata = chatObject is Map
+      ? _coerceJsonMap(chatObject['metadata'])
+      : const <String, dynamic>{};
+  final isLobeHub = blobMetadata['backend']?.toString() == 'lobehub' ||
+      existingTopMetadata['backend']?.toString() == 'lobehub' ||
+      topLevelMeta['backend']?.toString() == 'lobehub';
+
+  Map<String, dynamic> conversationMetadata;
+  if (isLobeHub) {
+    final projectedLobeMetadata = <String, dynamic>{};
+    for (final key in _knownLobeMetadataKeys) {
+      final blobVal = blobMetadata[key];
+      if (blobVal != null) {
+        projectedLobeMetadata[key] = blobVal;
+      }
+      final topMetaVal = topLevelMeta[key];
+      if (topMetaVal != null) {
+        projectedLobeMetadata[key] = topMetaVal;
+      }
+    }
+    if (!projectedLobeMetadata.containsKey('agentId')) {
+      final agentIdAlias =
+          topLevelMeta['agent_id'] ?? blobMetadata['agent_id'];
+      if (agentIdAlias != null) {
+        projectedLobeMetadata['agentId'] = agentIdAlias;
+      }
+    }
+    conversationMetadata = <String, dynamic>{
+      ...projectedLobeMetadata,
+      ...existingTopMetadata,
+      if (chatData['tasks'] is List) 'openwebui_tasks': chatData['tasks'],
+    };
+  } else {
+    conversationMetadata = <String, dynamic>{
+      ...existingTopMetadata,
+      if (chatData['tasks'] is List) 'openwebui_tasks': chatData['tasks'],
+    };
+  }
+
   return <String, dynamic>{
     'id': id,
     'title': title,
@@ -198,10 +240,7 @@ Map<String, dynamic> parseFullConversation(Map<String, dynamic> chatData) {
     'model': model,
     'systemPrompt': systemPrompt,
     'messages': messages,
-    'metadata': {
-      ..._coerceJsonMap(chatData['metadata']),
-      if (chatData['tasks'] is List) 'openwebui_tasks': chatData['tasks'],
-    },
+    'metadata': conversationMetadata,
     'pinned': pinned,
     'archived': archived,
     'shareId': shareId,

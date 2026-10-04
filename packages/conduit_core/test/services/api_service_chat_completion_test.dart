@@ -81,6 +81,34 @@ class _FakeAdapter implements HttpClientAdapter {
   void close({bool force = false}) {}
 }
 
+/// A fake [HttpClientAdapter] that feeds a caller-provided [Stream<Uint8List>]
+/// as the response body.
+class _StreamFakeAdapter implements HttpClientAdapter {
+  _StreamFakeAdapter({
+    required this.stream,
+  });
+
+  final Stream<Uint8List> stream;
+  RequestOptions? lastRequest;
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelOnError,
+  ) async {
+    lastRequest = options;
+    return ResponseBody(
+      stream,
+      200,
+      headers: const {},
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
 /// Queues multiple fake responses for sequential requests.
 class _QueuedFakeAdapter implements HttpClientAdapter {
   _QueuedFakeAdapter(this.responses);
@@ -440,6 +468,221 @@ void main() {
         // with task_id → taskSocket wins.
         check(session.transport).equals(ChatCompletionTransport.taskSocket);
         check(session.taskId).equals('task-misleading');
+      },
+    );
+
+    test(
+      'event-first SSE recognized before EOF with open StreamController',
+      () async {
+        final controller = StreamController<Uint8List>();
+
+        final adapter = _StreamFakeAdapter(stream: controller.stream);
+        final api = _buildApiServiceForTest(adapter);
+
+        controller.add(
+          Uint8List.fromList(
+            utf8.encode(
+              'event: response.output_item.added\ndata: {"item":{}}\n\n',
+            ),
+          ),
+        );
+
+        final session = await api.sendMessageSession(
+          messages: _minimalMessages,
+          model: _model,
+        );
+
+        // Classification succeeds immediately on the first chunk before the
+        // controller has closed.
+        check(session.transport).equals(ChatCompletionTransport.httpStream);
+        check(session.byteStream).isNotNull();
+        check(controller.isClosed).isFalse();
+
+        // Cleaning up the replayed stream cancels the underlying subscription.
+        final sub = session.byteStream!.listen((_) {});
+        await sub.cancel();
+        await controller.close();
+      },
+    );
+
+    test(
+      'comment-first SSE recognized before EOF with open StreamController',
+      () async {
+        final controller = StreamController<Uint8List>();
+
+        final adapter = _StreamFakeAdapter(stream: controller.stream);
+        final api = _buildApiServiceForTest(adapter);
+
+        controller.add(
+          Uint8List.fromList(
+            utf8.encode(': keepalive heartbeat\n\ndata: {"choices":[]}\n\n'),
+          ),
+        );
+
+        final session = await api.sendMessageSession(
+          messages: _minimalMessages,
+          model: _model,
+        );
+
+        check(session.transport).equals(ChatCompletionTransport.httpStream);
+        check(session.byteStream).isNotNull();
+        check(controller.isClosed).isFalse();
+
+        final sub = session.byteStream!.listen((_) {});
+        await sub.cancel();
+        await controller.close();
+      },
+    );
+
+    test(
+      'id-first and retry-first SSE recognized before EOF',
+      () async {
+        for (final prefix in ['id: msg_001\n', 'retry: 2500\n']) {
+          final controller = StreamController<Uint8List>();
+
+          final adapter = _StreamFakeAdapter(stream: controller.stream);
+          final api = _buildApiServiceForTest(adapter);
+
+          controller.add(
+            Uint8List.fromList(
+              utf8.encode('${prefix}data: {"choices":[]}\n\n'),
+            ),
+          );
+
+          final session = await api.sendMessageSession(
+            messages: _minimalMessages,
+            model: _model,
+          );
+
+          check(session.transport).equals(ChatCompletionTransport.httpStream);
+          check(controller.isClosed).isFalse();
+
+          final sub = session.byteStream!.listen((_) {});
+          await sub.cancel();
+          await controller.close();
+        }
+      },
+    );
+
+    test(
+      'fragmented UTF-8 SSE is recognized and replayed intact',
+      () async {
+        final controller = StreamController<Uint8List>();
+
+        final adapter = _StreamFakeAdapter(stream: controller.stream);
+        final api = _buildApiServiceForTest(adapter);
+
+        // '你' is 3 bytes in UTF-8: [0xE4, 0xBD, 0xA0].
+        // Split it across chunk 1 and chunk 2.
+        final chunk1 = [
+          ...utf8.encode('event: msg\ndata: {"text":"'),
+          0xE4,
+          0xBD,
+        ];
+        final chunk2 = [
+          0xA0,
+          ...utf8.encode('"}\n\n'),
+        ];
+
+        controller.add(Uint8List.fromList(chunk1));
+
+        final session = await api.sendMessageSession(
+          messages: _minimalMessages,
+          model: _model,
+        );
+
+        check(session.transport).equals(ChatCompletionTransport.httpStream);
+
+        // Feed the rest of the fragmented character and close.
+        controller.add(Uint8List.fromList(chunk2));
+        unawaited(controller.close());
+
+        final replayedBytes =
+            await session.byteStream!.expand((c) => c).toList();
+        final text = utf8.decode(replayedBytes);
+        check(text).contains('你');
+      },
+    );
+
+    test(
+      'replay stream cancels underlying subscription on consumer cancel',
+      () async {
+        var underlyingCancelled = false;
+        final controller = StreamController<List<int>>(
+          onCancel: () {
+            underlyingCancelled = true;
+          },
+        );
+
+        final api = _buildApiServiceForTest(_FakeAdapter.raw(bytes: const []));
+        final replayStreamFuture = api.sniffAndReplayForTest(controller.stream);
+
+        controller.add(
+          utf8.encode('event: msg\ndata: {"content":"start"}\n\n'),
+        );
+
+        final replayStream = await replayStreamFuture;
+        check(underlyingCancelled).isFalse();
+
+        final sub = replayStream.listen((_) {});
+        await sub.cancel();
+
+        check(underlyingCancelled).isTrue();
+      },
+    );
+
+    test(
+      'replay stream repeated cancellation is idempotent',
+      () async {
+        var underlyingCancelled = false;
+        final controller = StreamController<List<int>>(
+          onCancel: () {
+            underlyingCancelled = true;
+          },
+        );
+
+        final api = _buildApiServiceForTest(_FakeAdapter.raw(bytes: const []));
+        final replayStreamFuture = api.sniffAndReplayForTest(controller.stream);
+
+        controller.add(
+          utf8.encode('event: msg\ndata: {"content":"test"}\n\n'),
+        );
+
+        final replayStream = await replayStreamFuture;
+        final sub = replayStream.listen((_) {});
+        await sub.cancel();
+        await sub.cancel();
+
+        check(underlyingCancelled).isTrue();
+      },
+    );
+
+    test(
+      'body shape over header: JSON completion without task_id wins over event-stream header',
+      () async {
+        final jsonBody = jsonEncode({
+          'choices': [
+            {
+              'message': {'content': 'Direct plain response'},
+            },
+          ],
+        });
+        final adapter = _FakeAdapter.raw(
+          bytes: utf8.encode(jsonBody),
+          headers: {
+            'content-type': ['text/event-stream'],
+          },
+        );
+        final api = _buildApiServiceForTest(adapter);
+
+        final session = await api.sendMessageSession(
+          messages: _minimalMessages,
+          model: _model,
+        );
+
+        check(session.transport).equals(ChatCompletionTransport.jsonCompletion);
+        check(session.jsonPayload).isNotNull();
+        check(session.taskId).isNull();
       },
     );
 

@@ -65,7 +65,9 @@ final serverConnectionStateProvider = Provider<bool>((ref) {
 /// the warning never flashes during startup or appears for a server whose
 /// version we can't parse.
 final serverIncompatibleProvider = Provider<bool>((ref) {
-  final activeId = ref.watch(activeServerProvider).asData?.value?.id;
+  final activeServer = ref.watch(activeServerProvider).asData?.value;
+  if (activeServer?.isLobeHub == true) return false;
+  final activeId = activeServer?.id;
   final config = ref.watch(backendConfigProvider).asData?.value;
   if (activeId == null || config == null) return false;
   // Warn only on a config confirmed to belong to the active server — i.e. one

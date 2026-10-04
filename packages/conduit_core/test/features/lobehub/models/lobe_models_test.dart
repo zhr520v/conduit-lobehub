@@ -124,6 +124,57 @@ void main() {
       expect(updated.model, equals('claude-3-5-sonnet'));
       expect(updated.id, equals('agent-1'));
     });
+
+    test('roundtrips documented top-level provider and params successfully', () {
+      final json = <String, dynamic>{
+        'id': 'agent-provider-1',
+        'title': 'OpenAI Specialist',
+        'model': 'gpt-4o',
+        'provider': 'openai',
+        'params': {
+          'temperature': 0.7,
+          'top_p': 1.0,
+          'presence_penalty': 0.5,
+        },
+      };
+
+      final agent = LobeAgent.fromJson(json);
+
+      expect(agent.id, equals('agent-provider-1'));
+      expect(agent.title, equals('OpenAI Specialist'));
+      expect(agent.model, equals('gpt-4o'));
+      expect(agent.provider, equals('openai'));
+      expect(agent.params, equals({
+        'temperature': 0.7,
+        'top_p': 1.0,
+        'presence_penalty': 0.5,
+      }));
+
+      final serialized = agent.toJson();
+      expect(serialized['id'], equals('agent-provider-1'));
+      expect(serialized['title'], equals('OpenAI Specialist'));
+      expect(serialized['model'], equals('gpt-4o'));
+      expect(serialized['provider'], equals('openai'));
+      expect(serialized['params'], equals({
+        'temperature': 0.7,
+        'top_p': 1.0,
+        'presence_penalty': 0.5,
+      }));
+
+      final roundtripAgent = LobeAgent.fromJson(serialized);
+      expect(roundtripAgent.provider, equals('openai'));
+      expect(roundtripAgent.params, equals(agent.params));
+      expect(roundtripAgent, equals(agent));
+
+      // Test copyWith for provider and params
+      final updated = agent.copyWith(
+        provider: 'anthropic',
+        params: {'temperature': 0.2},
+      );
+      expect(updated.provider, equals('anthropic'));
+      expect(updated.params, equals({'temperature': 0.2}));
+      expect(updated.model, equals('gpt-4o'));
+    });
   });
 
   group('LobeTopic', () {

@@ -62,7 +62,8 @@ class SocketServiceManager extends _$SocketServiceManager {
     final immediatelyKnownServer = activeServerSnapshot.asData?.value;
     if (_service != null &&
         (immediatelyKnownServer == null ||
-            _service!.serverConfig.id != immediatelyKnownServer.id)) {
+            _service!.serverConfig.id != immediatelyKnownServer.id ||
+            immediatelyKnownServer.isLobeHub)) {
       // A live socket is safe to expose during an ordinary rebuild only while
       // the active server is still provably the same. Server selection enters
       // loading before its replacement resolves, so fail closed instead of
@@ -83,7 +84,7 @@ class SocketServiceManager extends _$SocketServiceManager {
       // server generation.
       return null;
     }
-    if (server == null) {
+    if (server == null || server.isLobeHub) {
       _disposeService();
       return null;
     }

@@ -137,8 +137,11 @@ Stream<OpenWebUIStreamUpdate> parseOpenWebUIStream(
         yield const OpenWebUIStreamDone();
         return;
       }
-      for (final update in parseOpenWebUIDataPayload(frame.data)) {
+      for (final update in parseOpenWebUIDataPayload(frame.data, frame.event)) {
         yield update;
+        if (update is OpenWebUIStreamDone) {
+          return;
+        }
       }
     }
   }
@@ -149,15 +152,24 @@ Stream<OpenWebUIStreamUpdate> parseOpenWebUIStream(
       yield const OpenWebUIStreamDone();
       return;
     }
-    for (final update in parseOpenWebUIDataPayload(frame.data)) {
+    for (final update in parseOpenWebUIDataPayload(frame.data, frame.event)) {
       yield update;
+      if (update is OpenWebUIStreamDone) {
+        return;
+      }
     }
   }
 }
 
 /// Decodes a JSON data payload and yields the appropriate typed updates.
-Iterable<OpenWebUIStreamUpdate> parseOpenWebUIDataPayload(String data) sync* {
-  yield* parseOpenWebUIParsedPayload(decodeOpenWebUIDataPayload(data));
+Iterable<OpenWebUIStreamUpdate> parseOpenWebUIDataPayload(
+  String data, [
+  String? eventType,
+]) sync* {
+  yield* parseOpenWebUIParsedPayload(
+    decodeOpenWebUIDataPayload(data),
+    eventType,
+  );
 }
 
 /// Decodes a raw OpenWebUI/OpenAI-compatible SSE `data:` payload.
@@ -173,8 +185,9 @@ Map<String, dynamic> decodeOpenWebUIDataPayload(String data) {
 
 /// Converts a decoded payload map into typed stream updates.
 Iterable<OpenWebUIStreamUpdate> parseOpenWebUIParsedPayload(
-  Map<String, dynamic> parsed,
-) sync* {
+  Map<String, dynamic> parsed, [
+  String? eventType,
+]) sync* {
   final envelopedEvent = parsed['event'];
   if (envelopedEvent is Map) {
     final event = _eventUpdateFromMap(envelopedEvent);
@@ -184,13 +197,17 @@ Iterable<OpenWebUIStreamUpdate> parseOpenWebUIParsedPayload(
     }
   }
 
-  if (parsed['error'] != null) {
-    yield OpenWebUIErrorUpdate(parsed['error'] as Map<String, dynamic>);
-    return;
-  }
+  final rawType = parsed['type'];
+  final frameType = (rawType is String && rawType.startsWith('response.'))
+      ? rawType
+      : (eventType != null && eventType.startsWith('response.'))
+          ? eventType
+          : null;
 
-  final frameType = parsed['type'];
-  if (frameType is String && frameType.startsWith('response.')) {
+  if (frameType != null) {
+    if (parsed['type'] == null) {
+      parsed['type'] = frameType;
+    }
     yield OpenWebUIResponseStreamEvent(parsed);
     if (frameType == 'response.completed' ||
         frameType == 'response.failed' ||
@@ -200,7 +217,23 @@ Iterable<OpenWebUIStreamUpdate> parseOpenWebUIParsedPayload(
       if (usage is Map && usage.isNotEmpty) {
         yield OpenWebUIUsageUpdate(usage.cast<String, dynamic>());
       }
+      final isFailed = (frameType == 'response.completed' &&
+          response is Map &&
+          response['status'] == 'failed');
+      if (isFailed) {
+        yield OpenWebUIErrorUpdate(_extractResponseErrorMap(parsed, response));
+      }
+      yield const OpenWebUIStreamDone();
     }
+    return;
+  }
+
+  if (parsed['error'] != null) {
+    final rawError = parsed['error'];
+    final errorMap = rawError is Map
+        ? rawError.cast<String, dynamic>()
+        : <String, dynamic>{'message': rawError.toString()};
+    yield OpenWebUIErrorUpdate(errorMap);
     return;
   }
 
@@ -288,4 +321,36 @@ String openWebUIStreamingReasoningDelta(Map<dynamic, dynamic> delta) {
     if (text.isNotEmpty) return text;
   }
   return '';
+}
+
+Map<String, dynamic> _extractResponseErrorMap(
+  Map<String, dynamic> parsed,
+  Object? response,
+) {
+  final responseMap = response is Map ? response : null;
+  final rawError = responseMap?['error'] ??
+      (responseMap?['status_details'] is Map
+          ? (responseMap!['status_details'] as Map)['error']
+          : null) ??
+      parsed['error'];
+
+  if (rawError is Map) {
+    final map = rawError.cast<String, dynamic>();
+    if (map['message'] == null) {
+      final fallbackMessage = map['detail']?.toString() ??
+          (map['code'] != null
+              ? 'Response failed (${map['code']})'
+              : 'The response failed.');
+      return {...map, 'message': fallbackMessage};
+    }
+    return map;
+  }
+  if (rawError != null) {
+    return <String, dynamic>{'message': rawError.toString()};
+  }
+  final statusDetails = responseMap?['status_details'];
+  if (statusDetails != null) {
+    return <String, dynamic>{'message': statusDetails.toString()};
+  }
+  return const <String, dynamic>{'message': 'The response failed.'};
 }

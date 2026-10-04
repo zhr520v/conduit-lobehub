@@ -23,22 +23,76 @@ mixin _FilesApi on _ApiServiceBase {
     final cancellationLink = _FileContentCancellationLink(cancelToken);
     final requestCancelToken = cancellationLink.requestToken;
     try {
-      final response = await _dio.get<ResponseBody>(
-        '/api/v1/files/$fileId/content',
-        options: _withAuthSnapshot(
-          Options(responseType: ResponseType.stream),
-          authSnapshot,
-        ),
-        cancelToken: requestCancelToken,
-      );
+      final Response<ResponseBody> response;
+      String? fallbackFileName;
+
+      if (_isLobeHub) {
+        // Step 1: Query documented LobeHub GET /files/:id/url endpoint
+        // Routes plural files.route.ts has GET detail /:id /url, NOT /content.
+        final urlResponse = await _dio.get(
+          '/api/v1/files/$fileId/url',
+          options: _withAuthSnapshot(Options(), authSnapshot),
+          cancelToken: requestCancelToken,
+        );
+        final rawData = urlResponse.data;
+        if (rawData is! Map) {
+          throw const FormatException('Invalid file URL response: expected Map');
+        }
+        if (rawData['success'] == false) {
+          final message = rawData['message'] ?? rawData['error'] ?? 'Unknown error';
+          throw FormatException('Failed to get file URL on server: $message');
+        }
+        final data = rawData['data'];
+        if (data is! Map) {
+          throw const FormatException(
+            'Invalid file URL response: missing data map in LobeHub getFileUrl',
+          );
+        }
+        final rawUrl = data['url'];
+        if (rawUrl is! String || rawUrl.trim().isEmpty) {
+          throw const FormatException(
+            'Invalid file URL response: missing or invalid url in LobeHub getFileUrl',
+          );
+        }
+        final downloadUrl = rawUrl.trim();
+        final rawName = data['name'];
+        if (rawName is String && rawName.trim().isNotEmpty) {
+          fallbackFileName = rawName.trim();
+        }
+
+        // Step 2: Stream bytes from downloadUrl without leaking server credentials
+        // to S3 or cross-origin endpoints.
+        response = await _dio.get<ResponseBody>(
+          downloadUrl,
+          options: Options(
+            responseType: ResponseType.stream,
+            headers: const {'Accept': '*/*'},
+            extra: <String, dynamic>{
+              ApiAuthInterceptor.candidateAuthTokenExtraKey: '',
+            },
+          ),
+          cancelToken: requestCancelToken,
+        );
+      } else {
+        response = await _dio.get<ResponseBody>(
+          '/api/v1/files/$fileId/content',
+          options: _withAuthSnapshot(
+            Options(responseType: ResponseType.stream),
+            authSnapshot,
+          ),
+          cancelToken: requestCancelToken,
+        );
+      }
 
       // Try to determine the mime type from response headers; fallback to text/plain
       final contentType =
           response.headers.value(HttpHeaders.contentTypeHeader) ?? '';
       String mimeType = 'text/plain';
-      if (contentType.isNotEmpty) {
+      if (contentType.isNotEmpty && contentType != 'application/octet-stream') {
         // Strip charset if present
         mimeType = contentType.split(';').first.trim();
+      } else if (fallbackFileName != null) {
+        mimeType = _getMimeType(fallbackFileName) ?? 'text/plain';
       }
 
       final advertisedLength = int.tryParse(
@@ -103,7 +157,130 @@ mixin _FilesApi on _ApiServiceBase {
       options: _withAuthSnapshot(Options(), authSnapshot),
       cancelToken: cancelToken,
     );
-    return response.data as Map<String, dynamic>;
+    final rawData = response.data;
+    if (rawData is! Map) {
+      throw const FormatException('Invalid file info response: expected Map');
+    }
+    return _normalizeFileInfoResponse(rawData);
+  }
+
+  Map<String, dynamic> _normalizeLobeHubFileItem(Map fileField) {
+    final id = fileField['id'];
+    if (id is! String || id.trim().isEmpty) {
+      throw const FormatException(
+        'Invalid response format: missing or invalid file ID in LobeHub file',
+      );
+    }
+    final name = fileField['name'] ?? fileField['filename'];
+    if (name is! String || name.trim().isEmpty) {
+      throw const FormatException(
+        'Invalid response format: missing or invalid filename in LobeHub file',
+      );
+    }
+    final normalized = Map<String, dynamic>.from(fileField);
+    normalized['id'] = id.trim();
+    normalized['filename'] = name.trim();
+    normalized['original_filename'] = (normalized['original_filename'] ??
+            normalized['originalFilename'] ??
+            normalized['filename'])
+        .toString()
+        .trim();
+    if (normalized['content_type'] == null) {
+      if (normalized['fileType'] != null) {
+        normalized['content_type'] = normalized['fileType'];
+      } else if (normalized['mimeType'] != null) {
+        normalized['content_type'] = normalized['mimeType'];
+      }
+    }
+    if (normalized['created_at'] == null && normalized['createdAt'] != null) {
+      normalized['created_at'] = normalized['createdAt'];
+    }
+    if (normalized['updated_at'] == null && normalized['updatedAt'] != null) {
+      normalized['updated_at'] = normalized['updatedAt'];
+    }
+    final existingMeta = normalized['metadata'] ?? normalized['meta'];
+    final metaMap = existingMeta is Map
+        ? Map<String, dynamic>.from(existingMeta)
+        : <String, dynamic>{};
+    if (normalized['url'] != null && !metaMap.containsKey('url')) {
+      metaMap['url'] = normalized['url'];
+    }
+    normalized['metadata'] = metaMap;
+    return normalized;
+  }
+
+  Map<String, dynamic> _normalizeFileInfoResponse(Map rawData) {
+    if (_isLobeHub) {
+      if (rawData['success'] == false) {
+        final message = rawData['message'] ?? rawData['error'] ?? 'Unknown error';
+        throw FormatException('Failed to get file info on server: $message');
+      }
+      final dataField = rawData['data'];
+      if (dataField is! Map) {
+        throw const FormatException(
+          'Invalid file info response: missing data envelope in LobeHub getFileInfo',
+        );
+      }
+      final fileField = dataField['file'];
+      if (fileField is! Map) {
+        throw const FormatException(
+          'Invalid file info response: missing data.file envelope in LobeHub getFileInfo',
+        );
+      }
+      final normalized = _normalizeLobeHubFileItem(fileField);
+      if (dataField['parsed'] != null) {
+        final metaMap = normalized['metadata'] is Map
+            ? Map<String, dynamic>.from(normalized['metadata'] as Map)
+            : <String, dynamic>{};
+        if (!metaMap.containsKey('parsed')) {
+          metaMap['parsed'] = dataField['parsed'];
+        }
+        normalized['metadata'] = metaMap;
+      }
+      return normalized;
+    }
+
+    final dataField = rawData['data'];
+    if (dataField is Map) {
+      final fileField = dataField['file'];
+      if (fileField is Map) {
+        final normalized = Map<String, dynamic>.from(fileField);
+        if (normalized['filename'] == null && normalized['name'] != null) {
+          normalized['filename'] = normalized['name'];
+        }
+        if (normalized['original_filename'] == null &&
+            normalized['filename'] != null) {
+          normalized['original_filename'] = normalized['filename'];
+        }
+        if (normalized['content_type'] == null) {
+          if (normalized['fileType'] != null) {
+            normalized['content_type'] = normalized['fileType'];
+          } else if (normalized['mimeType'] != null) {
+            normalized['content_type'] = normalized['mimeType'];
+          }
+        }
+        if (normalized['created_at'] == null &&
+            normalized['createdAt'] != null) {
+          normalized['created_at'] = normalized['createdAt'];
+        }
+        if (normalized['updated_at'] == null &&
+            normalized['updatedAt'] != null) {
+          normalized['updated_at'] = normalized['updatedAt'];
+        }
+        if (dataField['parsed'] != null) {
+          final existingMeta = normalized['metadata'] ?? normalized['meta'];
+          final metaMap = existingMeta is Map
+              ? Map<String, dynamic>.from(existingMeta)
+              : <String, dynamic>{};
+          if (!metaMap.containsKey('parsed')) {
+            metaMap['parsed'] = dataField['parsed'];
+          }
+          normalized['metadata'] = metaMap;
+        }
+        return normalized;
+      }
+    }
+    return Map<String, dynamic>.from(rawData);
   }
 
   Future<List<FileInfo>> getUserFilesForSession({
@@ -129,6 +306,57 @@ mixin _FilesApi on _ApiServiceBase {
     ApiAuthSnapshot? authSnapshot,
     CancelToken? cancelToken,
   }) async {
+    if (_isLobeHub) {
+      final response = await _dio.get(
+        '/api/v1/files',
+        queryParameters: {'page': page},
+        options: _withAuthSnapshot(Options(), authSnapshot),
+        cancelToken: cancelToken,
+      );
+      final rawData = response.data;
+      if (rawData is! Map) {
+        throw const FormatException('Invalid user files response: expected Map');
+      }
+      if (rawData['success'] == false) {
+        final message = rawData['message'] ?? rawData['error'] ?? 'Unknown error';
+        throw FormatException('Failed to get user files on server: $message');
+      }
+      final dataField = rawData['data'];
+      if (dataField is! Map) {
+        throw const FormatException(
+          'Invalid user files response: missing data envelope in LobeHub getFiles',
+        );
+      }
+      final filesList = dataField['files'];
+      if (filesList is! List) {
+        throw const FormatException(
+          'Invalid user files response: missing data.files list in LobeHub getFiles',
+        );
+      }
+      final totalValue = dataField['total'];
+      final total = switch (totalValue) {
+        int raw => raw,
+        num raw => raw.toInt(),
+        String raw => int.tryParse(raw),
+        _ => null,
+      };
+      final items = <FileInfo>[];
+      for (final item in filesList) {
+        if (item is! Map) {
+          throw const FormatException(
+            'Invalid user files response: expected file item Map in data.files',
+          );
+        }
+        final normalized = _normalizeLobeHubFileItem(item);
+        items.add(FileInfo.fromJson(normalized));
+      }
+      return (
+        items: List<FileInfo>.unmodifiable(items),
+        total: total,
+        isPaginated: true,
+      );
+    }
+
     final response = await _dio.get(
       '/api/v1/files/',
       queryParameters: {'page': page, 'content': false},
@@ -239,24 +467,67 @@ mixin _FilesApi on _ApiServiceBase {
     return response.data as Map<String, dynamic>;
   }
 
-  /// Uploads an in-memory file to `/files/` and returns the new file id. Used by
-  /// the workspace knowledge browser for both binary uploads and generated text
-  /// files. Mirrors [uploadFileWithProgress] but takes bytes directly.
+  bool get _isLobeHub => serverConfig.id == 'lobehub_self_hosted';
+
+  String _parseUploadResponse(dynamic responseData) {
+    if (responseData is! Map) {
+      throw const FormatException('Invalid response format: missing file ID');
+    }
+    if (_isLobeHub) {
+      if (responseData['success'] == false) {
+        final message = responseData['message'] ?? responseData['error'];
+        throw FormatException('Upload failed on server: $message');
+      }
+      final data = responseData['data'];
+      if (data is Map) {
+        final file = data['file'];
+        if (file is Map) {
+          final id = file['id'];
+          if (id is String && id.trim().isNotEmpty) {
+            return id.trim();
+          }
+        }
+      }
+      throw const FormatException(
+        'Invalid response format: missing or invalid file ID in data.file.id',
+      );
+    } else {
+      final id = responseData['id'];
+      if (id is String && id.trim().isNotEmpty) {
+        return id.trim();
+      }
+      throw const FormatException(
+        'Invalid response format: missing or invalid file ID',
+      );
+    }
+  }
+
+  /// Uploads an in-memory file to `/files/` (or `/files` on LobeHub) and
+  /// returns the new file id. Used by the workspace knowledge browser for both
+  /// binary uploads and generated text files. Mirrors [uploadFile] but takes
+  /// bytes directly.
   Future<String> uploadFileBytes(
     String fileName,
     List<int> bytes, {
     void Function(int sent, int total)? onProgress,
+    CancelToken? cancelToken,
+    ApiAuthSnapshot? authSnapshot,
   }) async {
     _traceApi('Uploading file bytes: $fileName (${bytes.length} bytes)');
     final formData = FormData.fromMap({
       'file': MultipartFile.fromBytes(bytes, filename: fileName),
     });
+    final uploadPath = _isLobeHub ? '/api/v1/files' : '/api/v1/files/';
     final response = await _dio.post(
-      '/api/v1/files/',
+      uploadPath,
       data: formData,
+      cancelToken: cancelToken,
+      options: _withAuthSnapshot(Options(), authSnapshot),
       onSendProgress: onProgress,
     );
-    return response.data['id'] as String;
+    final fileId = _parseUploadResponse(response.data);
+    _traceApi('File uploaded bytes successfully with ID: $fileId');
+    return fileId;
   }
 
   // File upload for RAG
@@ -292,9 +563,10 @@ mixin _FilesApi on _ApiServiceBase {
           'metadata': jsonEncode(metadata),
       });
 
-      _traceApi('Uploading to /api/v1/files/');
+      final uploadPath = _isLobeHub ? '/api/v1/files' : '/api/v1/files/';
+      _traceApi('Uploading to $uploadPath');
       final response = await _dio.post(
-        '/api/v1/files/',
+        uploadPath,
         data: formData,
         cancelToken: cancelToken,
         options: _withAuthSnapshot(
@@ -310,13 +582,9 @@ mixin _FilesApi on _ApiServiceBase {
       );
       DebugLogger.log('upload-ok', scope: 'api/files');
 
-      if (response.data is Map && response.data['id'] != null) {
-        final fileId = response.data['id'] as String;
-        _traceApi('File uploaded successfully with ID: $fileId');
-        return fileId;
-      } else {
-        throw Exception('Invalid response format: missing file ID');
-      }
+      final fileId = _parseUploadResponse(response.data);
+      _traceApi('File uploaded successfully with ID: $fileId');
+      return fileId;
     } catch (e) {
       DebugLogger.error('upload-failed', scope: 'api/files', error: e);
       rethrow;

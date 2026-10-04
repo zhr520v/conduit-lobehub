@@ -15,6 +15,8 @@ class LobeAgent {
     this.avatar,
     this.systemRole,
     this.model,
+    this.provider,
+    this.params = const <String, dynamic>{},
     this.chatConfig = const <String, dynamic>{},
     this.plugins = const <String>[],
     this.createdAt,
@@ -42,6 +44,12 @@ class LobeAgent {
   /// Model identifier configured for this agent (e.g. `'gpt-4o'`).
   final String? model;
 
+  /// Documented top-level model provider identifier (e.g. `'openai'`, `'anthropic'`).
+  final String? provider;
+
+  /// Documented top-level agent model parameters (e.g. temperature, presence_penalty, etc.).
+  final Map<String, dynamic> params;
+
   /// Agent chat parameters (temperature, presence_penalty, etc.).
   final Map<String, dynamic> chatConfig;
 
@@ -62,6 +70,8 @@ class LobeAgent {
     systemRole:
         json['systemRole']?.toString() ?? json['system_role']?.toString(),
     model: json['model']?.toString(),
+    provider: json['provider']?.toString(),
+    params: parseLobeJsonMap(json['params']),
     chatConfig: parseLobeJsonMap(json['chatConfig'] ?? json['chat_config']),
     plugins: parseLobeStringList(json['plugins']),
     createdAt: parseLobeDateTime(json['createdAt'] ?? json['created_at']),
@@ -75,6 +85,8 @@ class LobeAgent {
     if (avatar != null) 'avatar': avatar,
     if (systemRole != null) 'systemRole': systemRole,
     if (model != null) 'model': model,
+    if (provider != null) 'provider': provider,
+    if (params.isNotEmpty) 'params': params,
     'chatConfig': chatConfig,
     'plugins': plugins,
     if (createdAt != null) 'createdAt': createdAt!.toIso8601String(),
@@ -88,6 +100,8 @@ class LobeAgent {
     Object? avatar = _sentinel,
     Object? systemRole = _sentinel,
     Object? model = _sentinel,
+    Object? provider = _sentinel,
+    Map<String, dynamic>? params,
     Map<String, dynamic>? chatConfig,
     List<String>? plugins,
     Object? createdAt = _sentinel,
@@ -103,6 +117,10 @@ class LobeAgent {
         ? this.systemRole
         : systemRole as String?,
     model: identical(model, _sentinel) ? this.model : model as String?,
+    provider: identical(provider, _sentinel)
+        ? this.provider
+        : provider as String?,
+    params: params ?? this.params,
     chatConfig: chatConfig ?? this.chatConfig,
     plugins: plugins ?? this.plugins,
     createdAt: identical(createdAt, _sentinel)
@@ -124,6 +142,8 @@ class LobeAgent {
           avatar == other.avatar &&
           systemRole == other.systemRole &&
           model == other.model &&
+          provider == other.provider &&
+          const DeepCollectionEquality().equals(params, other.params) &&
           const DeepCollectionEquality().equals(chatConfig, other.chatConfig) &&
           const DeepCollectionEquality().equals(plugins, other.plugins) &&
           createdAt == other.createdAt &&
@@ -137,6 +157,8 @@ class LobeAgent {
     avatar,
     systemRole,
     model,
+    provider,
+    const DeepCollectionEquality().hash(params),
     const DeepCollectionEquality().hash(chatConfig),
     const DeepCollectionEquality().hash(plugins),
     createdAt,
@@ -145,5 +167,5 @@ class LobeAgent {
 
   @override
   String toString() =>
-      'LobeAgent(id: $id, title: $title, model: $model, plugins: $plugins, createdAt: $createdAt)';
+      'LobeAgent(id: $id, title: $title, model: $model, provider: $provider, plugins: $plugins, createdAt: $createdAt)';
 }

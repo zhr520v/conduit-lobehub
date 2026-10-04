@@ -468,8 +468,16 @@ void main() {
       expect(topic.groupId, equals('folder-plain'));
       expect(topic.favorite, isFalse);
       expect(topic.agentId, equals('legacy-agent'));
-      expect(topic.createdAt, equals(DateTime.fromMillisecondsSinceEpoch(1760000000 * 1000)));
-      expect(topic.updatedAt, equals(DateTime.fromMillisecondsSinceEpoch(1760000500 * 1000)));
+      expect(
+        topic.createdAt,
+        equals(DateTime.fromMillisecondsSinceEpoch(1760000000 * 1000, isUtc: true)),
+      );
+      expect(topic.createdAt?.isUtc, isTrue);
+      expect(
+        topic.updatedAt,
+        equals(DateTime.fromMillisecondsSinceEpoch(1760000500 * 1000, isUtc: true)),
+      );
+      expect(topic.updatedAt?.isUtc, isTrue);
       expect(topic.metadata['legacyKey'], equals('legacyValue'));
     });
 
@@ -564,7 +572,11 @@ void main() {
       expect(msg.role, equals('assistant'));
       expect(msg.content, equals('Direct content from row'));
       expect(msg.model, equals('gemini-1.5-pro'));
-      expect(msg.createdAt, equals(DateTime.fromMillisecondsSinceEpoch(1760000000 * 1000)));
+      expect(
+        msg.createdAt,
+        equals(DateTime.fromMillisecondsSinceEpoch(1760000000 * 1000, isUtc: true)),
+      );
+      expect(msg.createdAt?.isUtc, isTrue);
       expect(msg.tools, isEmpty);
       expect(msg.reasoning, isNull);
     });

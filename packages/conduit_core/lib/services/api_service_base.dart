@@ -1902,8 +1902,8 @@ abstract class _ApiServiceBase {
           allowMalformed: true,
         );
 
-        // Check for SSE data prefix
-        if (textSoFar.trimLeft().startsWith('data:')) {
+        // Check for SSE prefix (data, event, id, retry, or comment)
+        if (_looksLikeSse(textSoFar)) {
           sub.pause();
           completer.complete(_SniffSse(buffered: buffered, rest: sub));
           return;
@@ -1934,7 +1934,7 @@ abstract class _ApiServiceBase {
             completer.complete(_SniffJson(json: json));
           } else if (text.trim() == 'null') {
             completer.complete(_SniffJson(json: null));
-          } else if (text.trimLeft().startsWith('data:')) {
+          } else if (_looksLikeSse(text)) {
             // Can't replay a done stream, but classify it correctly.
             completer.complete(_SniffSse(buffered: buffered, rest: null));
           } else {
@@ -1954,25 +1954,91 @@ abstract class _ApiServiceBase {
     return completer.future;
   }
 
+  /// Determines whether [text] looks like the beginning of an SSE stream
+  /// (starting with a field line `data:`, `event:`, `id:`, `retry:`, or a
+  /// comment line starting with `:`).
+  static bool _looksLikeSse(String text) {
+    var trimmed = text;
+    if (trimmed.startsWith('\uFEFF')) {
+      trimmed = trimmed.substring(1);
+    }
+    trimmed = trimmed.trimLeft();
+    return trimmed.startsWith('data:') ||
+        trimmed.startsWith('event:') ||
+        trimmed.startsWith('id:') ||
+        trimmed.startsWith('retry:') ||
+        trimmed.startsWith(':');
+  }
+
   /// Reconstructs a byte stream from buffered chunks and an optional
-  /// remaining subscription.
+  /// remaining subscription. Cancelling the returned stream cancels [rest]
+  /// and invokes [onCancelAbort] if provided.
   Stream<List<int>> _replayStream(
     List<List<int>> buffered,
-    StreamSubscription<List<int>>? rest,
-  ) async* {
-    for (final chunk in buffered) {
-      yield chunk;
-    }
-    if (rest != null) {
-      final controller = StreamController<List<int>>();
-      rest
-        ..onData(controller.add)
-        ..onDone(controller.close)
-        ..onError(controller.addError);
-      rest.resume();
-      yield* controller.stream;
-    }
+    StreamSubscription<List<int>>? rest, {
+    FutureOr<void> Function()? onCancelAbort,
+  }) {
+    late final StreamController<List<int>> controller;
+    controller = StreamController<List<int>>(
+      onListen: () {
+        for (final chunk in buffered) {
+          controller.add(chunk);
+        }
+        if (rest != null) {
+          rest
+            ..onData((chunk) {
+              if (!controller.isClosed) {
+                controller.add(chunk);
+              }
+            })
+            ..onDone(() {
+              if (!controller.isClosed) {
+                controller.close();
+              }
+            })
+            ..onError((Object error, StackTrace stackTrace) {
+              if (!controller.isClosed) {
+                controller.addError(error, stackTrace);
+              }
+            });
+          rest.resume();
+        } else {
+          controller.close();
+        }
+      },
+      onPause: () => rest?.pause(),
+      onResume: () => rest?.resume(),
+      onCancel: () async {
+        try {
+          await rest?.cancel();
+        } finally {
+          if (onCancelAbort != null) {
+            await onCancelAbort();
+            await Future<void>.microtask(() {});
+          }
+        }
+      },
+    );
+    return controller.stream;
   }
+
+  @visibleForTesting
+  Future<Stream<List<int>>> sniffAndReplayForTest(
+    Stream<List<int>> stream,
+  ) async {
+    final result = await _sniffChatCompletionBody(stream);
+    return switch (result) {
+      _SniffSse(:final buffered, :final rest) => _replayStream(buffered, rest),
+      _ => throw StateError('Expected SSE sniff result'),
+    };
+  }
+
+  @visibleForTesting
+  Stream<List<int>> replayStreamForTest(
+    List<List<int>> buffered,
+    StreamSubscription<List<int>>? rest, {
+    FutureOr<void> Function()? onCancelAbort,
+  }) => _replayStream(buffered, rest, onCancelAbort: onCancelAbort);
 
   /// Set once the bulk active-chats endpoint returns 404 or 405. Open WebUI
   /// 0.11 removed that endpoint and exposes `active` on chat-list rows instead.

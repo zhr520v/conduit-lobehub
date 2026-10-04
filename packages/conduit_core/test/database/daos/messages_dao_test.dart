@@ -598,5 +598,74 @@ void main() {
         check(row.dirty).isFalse();
       },
     );
+
+    test(
+      'markAssistantCompletionPreSubmissionFailed and rearmAssistantCompletion round-trip',
+      () async {
+        await db.chatsDao.upsertEnvelopeStub(
+          id: 'chat-pre-sub',
+          title: 'Pre-submission Failure',
+          createdAt: 1,
+          updatedAt: 1,
+        );
+        await db.messagesDao.upsertLocalEcho(
+          echo(
+            chatId: 'chat-pre-sub',
+            id: 'asst-pre-sub',
+            content: '',
+            payload: const {
+              'id': 'asst-pre-sub',
+              'role': 'assistant',
+              'content': '',
+              'isStreaming': true,
+              'metadata': {
+                'completionSubmitted': false,
+              },
+            },
+          ),
+        );
+
+        final failed =
+            await db.messagesDao.markAssistantCompletionPreSubmissionFailed(
+              chatId: 'chat-pre-sub',
+              messageId: 'asst-pre-sub',
+              error: 'unsupported vision (400)',
+            );
+        check(failed).isTrue();
+
+        final failedRow =
+            (await db.messagesDao.getForChat('chat-pre-sub')).single;
+        final failedPayload =
+            jsonDecode(failedRow.payload) as Map<String, dynamic>;
+        final failedMetadata = failedPayload['metadata'] as Map<String, dynamic>;
+        check(failedPayload['isStreaming']).equals(false);
+        check(failedPayload['done']).isNull();
+        check((failedPayload['error'] as Map)['content'])
+            .equals('unsupported vision (400)');
+        check(failedMetadata['completionSubmitted']).equals(false);
+        check(failedMetadata['terminal']).equals(true);
+        check(failedMetadata.containsKey('responseDone')).isFalse();
+
+        // Rearm for a manual retry run
+        final rearmed = await db.messagesDao.rearmAssistantCompletion(
+          chatId: 'chat-pre-sub',
+          messageId: 'asst-pre-sub',
+        );
+        check(rearmed).isTrue();
+
+        final rearmedRow =
+            (await db.messagesDao.getForChat('chat-pre-sub')).single;
+        final rearmedPayload =
+            jsonDecode(rearmedRow.payload) as Map<String, dynamic>;
+        final rearmedMetadata =
+            rearmedPayload['metadata'] as Map<String, dynamic>;
+        check(rearmedPayload['isStreaming']).equals(true);
+        check(rearmedPayload.containsKey('error')).isFalse();
+        check(rearmedPayload.containsKey('done')).isFalse();
+        check(rearmedMetadata.containsKey('terminal')).isFalse();
+        check(rearmedMetadata['completionSubmitted']).equals(false);
+        check(rearmedMetadata.containsKey('responseDone')).isFalse();
+      },
+    );
   });
 }

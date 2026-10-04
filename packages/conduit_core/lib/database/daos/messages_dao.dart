@@ -196,6 +196,62 @@ class MessagesDao extends DatabaseAccessor<AppDatabase>
     );
   }
 
+  /// Settles an unsubmitted or rejected completion placeholder with an explicit
+  /// terminal failure (e.g. 400 unsupported media, 401, 403) before the request
+  /// was accepted by the server.
+  ///
+  /// Deliberately sets completionSubmitted to false so the turn is not treated
+  /// as accepted by the server. Does not set responseDone so it is not treated as
+  /// a successful completion. Sets isStreaming to false to settle the UI spinner.
+  Future<bool> markAssistantCompletionPreSubmissionFailed({
+    required String chatId,
+    required String messageId,
+    required String error,
+  }) {
+    return _updateAssistantPayload(
+      chatId: chatId,
+      messageId: messageId,
+      mutate: (payload) {
+        final metadata = _asJsonMap(payload['metadata'])
+          ..remove('responseDone');
+        payload
+          ..remove('done')
+          ..['isStreaming'] = false
+          ..['error'] = <String, dynamic>{'content': error}
+          ..['metadata'] = <String, dynamic>{
+            ...metadata,
+            'completionSubmitted': false,
+            'terminal': true,
+          };
+      },
+    );
+  }
+
+  /// Rearms an assistant completion placeholder that previously failed
+  /// terminally, restoring it to an active streaming state for a new attempt.
+  Future<bool> rearmAssistantCompletion({
+    required String chatId,
+    required String messageId,
+  }) {
+    return _updateAssistantPayload(
+      chatId: chatId,
+      messageId: messageId,
+      mutate: (payload) {
+        final metadata = _asJsonMap(payload['metadata'])
+          ..remove('terminal')
+          ..remove('responseDone');
+        payload
+          ..remove('error')
+          ..remove('done')
+          ..['isStreaming'] = true
+          ..['metadata'] = <String, dynamic>{
+            ...metadata,
+            'completionSubmitted': false,
+          };
+      },
+    );
+  }
+
   Future<bool> _updateAssistantPayload({
     required String chatId,
     required String messageId,

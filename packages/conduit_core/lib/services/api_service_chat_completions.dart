@@ -1,5 +1,74 @@
 part of 'api_service.dart';
 
+/// Correlation snapshot for an Agent turn in LobeHub to ensure durable reconciliation.
+class LobeAgentCorrelation {
+  const LobeAgentCorrelation({
+    required this.topicId,
+    required this.agentId,
+    required this.userText,
+    required this.userLocalId,
+    required this.assistantLocalId,
+    required this.snapshotServerIds,
+    required this.createdAt,
+  });
+
+  final String topicId;
+  final String agentId;
+  final String userText;
+  final String userLocalId;
+  final String assistantLocalId;
+  final Set<String> snapshotServerIds;
+  final DateTime createdAt;
+
+  Map<String, dynamic> toJson() => {
+        'topicId': topicId,
+        'agentId': agentId,
+        'userText': userText,
+        'userLocalId': userLocalId,
+        'assistantLocalId': assistantLocalId,
+        'snapshotServerIds': snapshotServerIds.toList(),
+        'createdAt': createdAt.toIso8601String(),
+      };
+
+  factory LobeAgentCorrelation.fromJson(Map<String, dynamic> json) =>
+      LobeAgentCorrelation(
+        topicId: json['topicId']?.toString() ?? '',
+        agentId: json['agentId']?.toString() ?? '',
+        userText: json['userText']?.toString() ?? '',
+        userLocalId: json['userLocalId']?.toString() ?? '',
+        assistantLocalId: json['assistantLocalId']?.toString() ?? '',
+        snapshotServerIds: (json['snapshotServerIds'] as List<dynamic>?)
+                ?.map((e) => e.toString())
+                .toSet() ??
+            const <String>{},
+        createdAt: json['createdAt'] != null
+            ? DateTime.tryParse(json['createdAt'].toString()) ?? DateTime.now()
+            : DateTime.now(),
+      );
+}
+
+/// Result of reconciling server-generated messages after an Agent turn in LobeHub.
+class LobeReconcileResult {
+  const LobeReconcileResult({
+    required this.success,
+    this.serverUserId,
+    this.serverAssistantId,
+    this.errorMessage,
+    this.ambiguous = false,
+  });
+
+  final bool success;
+  final String? serverUserId;
+  final String? serverAssistantId;
+  final String? errorMessage;
+  final bool ambiguous;
+
+  @override
+  String toString() =>
+      'LobeReconcileResult(success: $success, serverUserId: $serverUserId, '
+      'serverAssistantId: $serverAssistantId, ambiguous: $ambiguous, errorMessage: $errorMessage)';
+}
+
 mixin _ChatCompletionsApi on _ApiServiceBase {
   // Send chat completed notification
   // This persists usage data and other message metadata to the server
@@ -20,6 +89,8 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
     List<String>? filterIds,
     ApiAuthSnapshot? authSnapshot,
   }) async {
+    // SendChatCompleted no-op on LobeHub
+    if (serverConfig.isLobeHub) return null;
     // Since 0.9 the server runs these filters before emitting chat:outlet.
     // The deprecated endpoint would run them a second time.
     if (_runsOutletFiltersInline) return null;
@@ -118,6 +189,8 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
     Map<String, dynamic>? userMessage,
     Map<String, dynamic>? variables,
     List<Map<String, dynamic>>? files,
+    String? lobeAgentId,
+    Future<void> Function(LobeAgentCorrelation correlation)? onPreDispatch,
   }) async {
     // Generate unique IDs
     final messageId =
@@ -143,6 +216,25 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
     }
 
     _streamCancelActions[messageId] = abort;
+
+    // Early branch for LobeHub backend
+    if (serverConfig.isLobeHub) {
+      return _sendLobeHubMessageSession(
+        messages: messages,
+        model: model,
+        conversationId: conversationId,
+        modelItem: modelItem,
+        responseMessageId: messageId,
+        userMessage: userMessage,
+        files: files,
+        lobeAgentId: lobeAgentId,
+        onPreDispatch: onPreDispatch,
+        sessionId: sessionId,
+        abort: abort,
+        activeCancelTokenCallback: (token) => activeCancelToken = token,
+      );
+    }
+
     var legacyPendingTurnPersisted = false;
 
     Future<void> ensureLegacyPendingTurnPersisted() async {
@@ -224,80 +316,6 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
     var status = resp.statusCode ?? 0;
 
     // Surface structured errors before transport binding.
-    if (status < 200 || status >= 300) {
-      if (status == 404) {
-        _traceApi(
-          'sendMessageSession: 404 on /api/chat/completions, trying LobeHub /api/v1/responses',
-        );
-        try {
-          var resolvedModel = model;
-          if (!resolvedModel.startsWith('agt_')) {
-            try {
-              final agentsResp = await _dio.get('/api/v1/agents');
-              final aData = agentsResp.data;
-              List<dynamic>? agentList;
-              if (aData is Map) {
-                final d = aData['data'];
-                if (d is Map && d['agents'] is List) {
-                  agentList = d['agents'] as List;
-                } else if (aData['agents'] is List) {
-                  agentList = aData['agents'] as List;
-                } else if (d is List) {
-                  agentList = d;
-                }
-              } else if (aData is List) {
-                agentList = aData;
-              }
-              if (agentList != null && agentList.isNotEmpty) {
-                final matched = agentList.firstWhere(
-                  (a) => a is Map && a['model'] == model,
-                  orElse: () => agentList!.first,
-                );
-                if (matched is Map && matched['id'] != null) {
-                  resolvedModel = matched['id'].toString();
-                }
-              }
-            } catch (_) {}
-          }
-
-          final lobeInput = <Map<String, dynamic>>[];
-          for (final m in messages) {
-            final role = m['role']?.toString() ?? 'user';
-            final content = m['content'];
-            lobeInput.add({
-              'type': 'message',
-              'role': role,
-              'content':
-                  content is String ? content : (content?.toString() ?? ''),
-            });
-          }
-          final lobePayload = <String, dynamic>{
-            'model': resolvedModel,
-            'stream': true,
-            'input': lobeInput,
-            if (conversationId != null && !conversationId.startsWith('local:'))
-              'topicId': conversationId,
-          };
-          final lobeResp = await _dio.post<ResponseBody>(
-            '/api/v1/responses',
-            data: lobePayload,
-            options: Options(
-              responseType: ResponseType.stream,
-              validateStatus: (s) => s != null && s < 600,
-            ),
-            cancelToken: activeCancelToken,
-          );
-          if ((lobeResp.statusCode ?? 0) >= 200 &&
-              (lobeResp.statusCode ?? 0) < 300) {
-            resp = lobeResp;
-            status = lobeResp.statusCode ?? 200;
-          }
-        } catch (e) {
-          _traceApi('sendMessageSession: LobeHub /api/v1/responses error: $e');
-        }
-      }
-    }
-
     if (status < 200 || status >= 300) {
       final error = await _decodeChatCompletionError(resp);
       final shouldRetryWithLegacy =
@@ -528,6 +546,7 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
 
   // === Tasks control (parity with Web client) ===
   Future<void> stopTask(String taskId) async {
+    if (serverConfig.isLobeHub) return;
     try {
       await _dio.post('/api/tasks/stop/$taskId');
     } catch (e) {
@@ -536,6 +555,7 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
   }
 
   Future<void> stopTasksByChat(String chatId) async {
+    if (serverConfig.isLobeHub) return;
     try {
       final encodedChatId = Uri.encodeComponent(chatId);
       await _dio.post('/api/tasks/chat/$encodedChatId/stop');
@@ -545,6 +565,7 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
   }
 
   Future<List<String>> getTaskIdsByChat(String chatId) async {
+    if (serverConfig.isLobeHub) return const [];
     try {
       final resp = await _dio.get('/api/tasks/chat/$chatId');
       final data = resp.data;
@@ -564,6 +585,7 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
     required OpenWebUiToolCallAction action,
     Map<String, dynamic>? answers,
   }) async {
+    if (serverConfig.isLobeHub) return const [];
     final response = await _dio.post(
       '/api/v1/chats/${Uri.encodeComponent(chatId)}/messages/'
       '${Uri.encodeComponent(messageId)}/resolve',
@@ -594,6 +616,7 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
   /// the same state on chat-list rows. A 404 or 405 permanently selects that
   /// list fallback for this API-service instance.
   Future<Set<String>> checkActiveChats(List<String> chatIds) async {
+    if (serverConfig.isLobeHub) return <String>{};
     if (chatIds.isEmpty) {
       return <String>{};
     }
@@ -641,5 +664,647 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
   /// Called by streaming_helper when finishStreaming is invoked.
   void clearStreamCancelToken(String messageId) {
     _streamCancelActions.remove(messageId);
+  }
+
+  /// Reconciles server-persisted user and assistant message records after a LobeHub
+  /// Agent turn, anchoring the local [conduitClientId] into message metadata.
+  Future<LobeReconcileResult> reconcileAgentTurn(
+    LobeAgentCorrelation correlation,
+  ) async {
+    if (correlation.topicId.isEmpty || correlation.topicId.startsWith('local:')) {
+      return const LobeReconcileResult(
+        success: false,
+        errorMessage: 'Local or empty topic cannot be reconciled',
+        ambiguous: false,
+      );
+    }
+
+    try {
+      final allMessages =
+          await fetchAllLobeHubMessages(_dio, topicId: correlation.topicId);
+      final newMessages = <Map<String, dynamic>>[];
+      for (final item in allMessages) {
+        final id = item['id']?.toString() ?? '';
+        if (id.isEmpty) continue;
+        if (correlation.snapshotServerIds.contains(id)) continue;
+        newMessages.add(item);
+      }
+
+      final matchingUsers = newMessages.where((m) {
+        if (m['role'] != 'user') return false;
+        final content = m['content']?.toString() ?? '';
+        return content.trim() == correlation.userText.trim();
+      }).toList();
+
+      if (matchingUsers.isEmpty) {
+        return const LobeReconcileResult(
+          success: false,
+          errorMessage: 'No matching user message found after snapshot',
+          ambiguous: false,
+        );
+      }
+      if (matchingUsers.length > 1) {
+        return const LobeReconcileResult(
+          success: false,
+          errorMessage:
+              'Ambiguous: multiple matching user messages found after snapshot',
+          ambiguous: true,
+        );
+      }
+      final userMsg = matchingUsers.single;
+      final serverUserId = userMsg['id'].toString();
+
+      // Find assistant message among new messages
+      var assistantCandidates = newMessages.where((m) {
+        if (m['role'] != 'assistant') return false;
+        final parentId = m['parentId']?.toString();
+        return parentId != null && parentId == serverUserId;
+      }).toList();
+
+      if (assistantCandidates.isEmpty) {
+        assistantCandidates =
+            newMessages.where((m) => m['role'] == 'assistant').toList();
+      }
+
+      if (assistantCandidates.isEmpty) {
+        return LobeReconcileResult(
+          success: false,
+          serverUserId: serverUserId,
+          errorMessage: 'No matching assistant message found after snapshot',
+          ambiguous: false,
+        );
+      }
+      if (assistantCandidates.length > 1) {
+        return LobeReconcileResult(
+          success: false,
+          serverUserId: serverUserId,
+          errorMessage:
+              'Ambiguous: multiple candidate assistant messages found after snapshot',
+          ambiguous: true,
+        );
+      }
+      final assistantMsg = assistantCandidates.single;
+      final serverAssistantId = assistantMsg['id'].toString();
+
+      // Patch user message metadata merging existing
+      final userExistingMeta = userMsg['metadata'] is Map
+          ? Map<String, dynamic>.from(userMsg['metadata'] as Map)
+          : (userMsg['meta'] is Map
+              ? Map<String, dynamic>.from(userMsg['meta'] as Map)
+              : <String, dynamic>{});
+      userExistingMeta['conduitClientId'] = correlation.userLocalId;
+      await _dio.patch(
+        '/api/v1/messages/$serverUserId',
+        data: {'metadata': userExistingMeta},
+      );
+
+      // Patch assistant message metadata merging existing
+      final asstExistingMeta = assistantMsg['metadata'] is Map
+          ? Map<String, dynamic>.from(assistantMsg['metadata'] as Map)
+          : (assistantMsg['meta'] is Map
+              ? Map<String, dynamic>.from(assistantMsg['meta'] as Map)
+              : <String, dynamic>{});
+      asstExistingMeta['conduitClientId'] = correlation.assistantLocalId;
+      await _dio.patch(
+        '/api/v1/messages/$serverAssistantId',
+        data: {'metadata': asstExistingMeta},
+      );
+
+      return LobeReconcileResult(
+        success: true,
+        serverUserId: serverUserId,
+        serverAssistantId: serverAssistantId,
+      );
+    } catch (e) {
+      return LobeReconcileResult(
+        success: false,
+        errorMessage: 'Reconcile failed: $e',
+        ambiguous: false,
+      );
+    }
+  }
+
+  Future<ChatCompletionSession> _sendLobeHubMessageSession({
+    required List<Map<String, dynamic>> messages,
+    required String model,
+    required String? conversationId,
+    required Map<String, dynamic>? modelItem,
+    required String responseMessageId,
+    required Map<String, dynamic>? userMessage,
+    required List<Map<String, dynamic>>? files,
+    required String? lobeAgentId,
+    required Future<void> Function(LobeAgentCorrelation correlation)?
+        onPreDispatch,
+    required String? sessionId,
+    required Future<void> Function() abort,
+    required void Function(CancelToken token) activeCancelTokenCallback,
+  }) async {
+    // 1. Reject multipart/file inference typedSyncTerminalException400 before any inference POST
+    final hasFiles = (files != null && files.isNotEmpty) ||
+        (userMessage != null &&
+            ((userMessage['files'] is List &&
+                    (userMessage['files'] as List).isNotEmpty) ||
+                (userMessage['attachment_ids'] is List &&
+                    (userMessage['attachment_ids'] as List).isNotEmpty) ||
+                (userMessage['embeds'] is List &&
+                    (userMessage['embeds'] as List).isNotEmpty))) ||
+        messages.any((m) =>
+            (m['files'] is List && (m['files'] as List).isNotEmpty) ||
+            (m['attachment_ids'] is List &&
+                (m['attachment_ids'] as List).isNotEmpty) ||
+            (m['embeds'] is List && (m['embeds'] as List).isNotEmpty) ||
+            m['content'] is List);
+
+    if (hasFiles) {
+      throw const SyncTerminalException(
+        statusCode: 400,
+        message:
+            'LobeHub REST v2.2.17 does not support file or image attachments in inference requests.',
+      );
+    }
+
+    // 2. Add optional lobeAgentId parameter explicit; derive verifiedAgent from actualtopic if no param.
+    String? resolvedAgentId = lobeAgentId;
+    if ((resolvedAgentId == null || resolvedAgentId.isEmpty) &&
+        conversationId != null &&
+        !conversationId.startsWith('local:')) {
+      try {
+        final topicResp = await _dio.get('/api/v1/topics/$conversationId');
+        final tData = topicResp.data;
+        Map<String, dynamic>? topicObj;
+        if (tData is Map) {
+          topicObj = tData['data'] is Map
+              ? Map<String, dynamic>.from(tData['data'] as Map)
+              : Map<String, dynamic>.from(tData);
+        }
+        final aId = topicObj?['agentId']?.toString();
+        if (aId != null && aId.isNotEmpty) {
+          resolvedAgentId = aId;
+        }
+      } on DioException catch (e) {
+        if (e.response?.statusCode != 404) {
+          throw SyncTerminalException(
+            statusCode: e.response?.statusCode ?? 500,
+            message: 'Failed to look up topic "$conversationId": ${e.message}',
+          );
+        }
+      }
+    }
+
+    // 3. Pre-inference deduplication & Snapshot: query server messages BEFORE any inference POST
+    List<Map<String, dynamic>> existingTopicMessages = const [];
+    if (conversationId != null && !conversationId.startsWith('local:')) {
+      existingTopicMessages =
+          await fetchAllLobeHubMessages(_dio, topicId: conversationId);
+      for (final m in existingTopicMessages) {
+        final role = m['role']?.toString();
+        final meta = m['metadata'] is Map
+            ? m['metadata'] as Map
+            : (m['meta'] is Map ? m['meta'] as Map : null);
+        final cid = meta?['conduitClientId']?.toString();
+        if ((cid == responseMessageId ||
+                m['id']?.toString() == responseMessageId) &&
+            role == 'assistant') {
+          // Pre-existing assistant alias found => NO inference POST!
+          final asstContent = m['content']?.toString() ?? '';
+          final asstReasoning = m['reasoning']?.toString();
+          return ChatCompletionSession.jsonCompletion(
+            messageId: responseMessageId,
+            sessionId: sessionId,
+            conversationId: conversationId,
+            jsonPayload: {
+              'id': responseMessageId,
+              'choices': [
+                {
+                  'index': 0,
+                  'message': {
+                    'role': 'assistant',
+                    'content': asstContent,
+                    if (asstReasoning != null && asstReasoning.isNotEmpty)
+                      'reasoning_content': asstReasoning,
+                  },
+                  'finish_reason': 'stop',
+                }
+              ],
+            },
+          );
+        }
+      }
+    }
+
+    // 4. Branch: Agent turn vs Ordinary model turn
+    if (resolvedAgentId != null && resolvedAgentId.isNotEmpty) {
+      // Fetch configured agent to verify model and provider
+      Map<String, dynamic>? agentObj;
+      try {
+        final agentResp = await _dio.get('/api/v1/agents/$resolvedAgentId');
+        final aData = agentResp.data;
+        if (aData is Map) {
+          agentObj = aData['data'] is Map
+              ? Map<String, dynamic>.from(aData['data'] as Map)
+              : Map<String, dynamic>.from(aData);
+        }
+      } catch (e) {
+        throw SyncTerminalException(
+          statusCode: 400,
+          message: 'Agent "$resolvedAgentId" not found on server.',
+        );
+      }
+      if (agentObj == null) {
+        throw SyncTerminalException(
+          statusCode: 400,
+          message: 'Agent "$resolvedAgentId" not found on server.',
+        );
+      }
+
+      final agentModel = agentObj['model']?.toString();
+      final agentProvider = agentObj['provider']?.toString();
+
+      // User chooses rawmodel in Agentconversation: MUST match configuredAgentmodel/provider or reject visible typed400
+      if (model.isNotEmpty && model != resolvedAgentId) {
+        if (agentModel != null && agentModel.isNotEmpty && model != agentModel) {
+          throw SyncTerminalException(
+            statusCode: 400,
+            message:
+                'Requested model "$model" does not match configured agent model "$agentModel". LobeHub does not support per-turn model overrides on agents.',
+          );
+        }
+      }
+
+      final reqProvider = modelItem?['provider']?.toString() ??
+          modelItem?['providerId']?.toString() ??
+          modelItem?['metadata']?['provider']?.toString();
+      if (reqProvider != null &&
+          agentProvider != null &&
+          reqProvider.isNotEmpty &&
+          agentProvider.isNotEmpty &&
+          reqProvider != agentProvider) {
+        throw SyncTerminalException(
+          statusCode: 400,
+          message:
+              'Requested provider "$reqProvider" does not match configured agent provider "$agentProvider".',
+        );
+      }
+
+      // Snapshot server IDs before dispatch
+      final snapshotServerIds = existingTopicMessages
+          .map((m) => m['id']?.toString() ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet();
+
+      final userText = userMessage?['content']?.toString() ??
+          (messages.isNotEmpty && messages.last['role'] == 'user'
+              ? (messages.last['content']?.toString() ?? '')
+              : '');
+      final userLocalId = userMessage?['id']?.toString() ??
+          (messages.isNotEmpty && messages.last['role'] == 'user'
+              ? (messages.last['id']?.toString() ?? '')
+              : const Uuid().v4());
+
+      final correlation = LobeAgentCorrelation(
+        topicId: conversationId ?? '',
+        agentId: resolvedAgentId,
+        userText: userText,
+        userLocalId: userLocalId,
+        assistantLocalId: responseMessageId,
+        snapshotServerIds: snapshotServerIds,
+        createdAt: DateTime.now(),
+      );
+
+      if (onPreDispatch != null) {
+        await onPreDispatch(correlation);
+      }
+
+      String? instructions;
+      for (final m in messages) {
+        if (m['role'] == 'system') {
+          final c = m['content'];
+          final str = c is String ? c : (c?.toString() ?? '');
+          if (str.trim().isNotEmpty) {
+            instructions = (instructions == null || instructions.isEmpty)
+                ? str.trim()
+                : '$instructions\n${str.trim()}';
+          }
+        }
+      }
+
+      final responsePayload = <String, dynamic>{
+        'model': resolvedAgentId,
+        'stream': true,
+        if (conversationId != null && !conversationId.startsWith('local:'))
+          'previous_response_id': conversationId,
+        'agentId': resolvedAgentId,
+        'provider': ?agentProvider,
+        'input': userText,
+        if (instructions != null && instructions.isNotEmpty)
+          'instructions': instructions,
+      };
+
+      final cancelToken = CancelToken();
+      activeCancelTokenCallback(cancelToken);
+
+      final resp = await _dio.post<ResponseBody>(
+        '/api/v1/responses',
+        data: responsePayload,
+        options: Options(
+          responseType: ResponseType.stream,
+          validateStatus: (s) => s != null && s < 600,
+        ),
+        cancelToken: cancelToken,
+      );
+
+      final status = resp.statusCode ?? 0;
+      if (status < 200 || status >= 300) {
+        final error = await _decodeChatCompletionError(resp);
+        throw SyncTerminalException(
+          statusCode: status,
+          message: 'Agent chat completion failed ($status): $error',
+        );
+      }
+
+      final byteStream = resp.data!.stream;
+      final wrappedStream = _wrapLobeResponseByteStream(
+        byteStream,
+        correlation: correlation,
+        onStreamCompleted: () async {
+          if (conversationId != null &&
+              !conversationId.startsWith('local:')) {
+            await reconcileAgentTurn(correlation);
+          }
+        },
+      );
+
+      return ChatCompletionSession.httpStream(
+        messageId: responseMessageId,
+        sessionId: sessionId,
+        conversationId: conversationId,
+        byteStream: wrappedStream,
+        abort: abort,
+      );
+    } else {
+      // Ordinary model turn using /api/v1/chat
+      String realModel = model;
+      String? realProvider = modelItem?['provider']?.toString() ??
+          modelItem?['providerId']?.toString() ??
+          modelItem?['owned_by']?.toString() ??
+          modelItem?['metadata']?['provider']?.toString();
+      if (realProvider == null && realModel.contains('/')) {
+        final parts = realModel.split('/');
+        realProvider = parts[0];
+        realModel = parts.sublist(1).join('/');
+      }
+
+      final cleanedMessages = <Map<String, dynamic>>[];
+      for (final m in messages) {
+        final c = m['content'];
+        final str = c is String ? c : (c?.toString() ?? '');
+        if (str.trim().isEmpty) continue;
+        cleanedMessages.add({
+          'role': m['role']?.toString() ?? 'user',
+          'content': str,
+        });
+      }
+
+      final chatPayload = <String, dynamic>{
+        'model': realModel,
+        'provider': ?realProvider,
+        'messages': cleanedMessages,
+        if (conversationId != null && !conversationId.startsWith('local:'))
+          'topicId': conversationId,
+      };
+
+      final cancelToken = CancelToken();
+      activeCancelTokenCallback(cancelToken);
+
+      final resp = await _dio.post(
+        '/api/v1/chat',
+        data: chatPayload,
+        options: Options(
+          validateStatus: (s) => s != null && s < 600,
+        ),
+        cancelToken: cancelToken,
+      );
+
+      final status = resp.statusCode ?? 0;
+      if (status < 200 || status >= 300) {
+        final err = resp.data is Map
+            ? (resp.data['error'] ?? resp.data['message'])
+            : resp.data;
+        throw SyncTerminalException(
+          statusCode: status,
+          message: 'Chat completion failed ($status): $err',
+        );
+      }
+
+      dynamic responseData = resp.data;
+      if (responseData is String) {
+        try {
+          responseData = jsonDecode(responseData);
+        } catch (_) {}
+      }
+      final dataMap =
+          responseData is Map ? responseData : <String, dynamic>{};
+      final innerData =
+          dataMap['data'] is Map ? (dataMap['data'] as Map) : dataMap;
+      String content = innerData['content']?.toString() ??
+          (innerData['message'] is Map
+              ? (innerData['message'] as Map)['content']?.toString()
+              : null) ??
+          '';
+      if (content.isEmpty &&
+          innerData['choices'] is List &&
+          (innerData['choices'] as List).isNotEmpty) {
+        final firstChoice = (innerData['choices'] as List).first;
+        if (firstChoice is Map && firstChoice['message'] is Map) {
+          content = (firstChoice['message'] as Map)['content']?.toString() ?? '';
+        }
+      }
+      final reasoning = innerData['reasoning']?.toString() ??
+          innerData['reasoning_content']?.toString();
+      final usage = innerData['usage'] is Map
+          ? Map<String, dynamic>.from(innerData['usage'] as Map)
+          : null;
+
+      // Persist assistant and user if needed before returning JSON session
+      if (conversationId != null && !conversationId.startsWith('local:')) {
+        final existingClientIds = <String>{};
+        for (final em in existingTopicMessages) {
+          final meta = em['metadata'] is Map
+              ? em['metadata'] as Map
+              : (em['meta'] is Map ? em['meta'] as Map : null);
+          final cid = meta?['conduitClientId']?.toString();
+          if (cid != null && cid.isNotEmpty) existingClientIds.add(cid);
+        }
+
+        if (userMessage != null) {
+          final uId = userMessage['id']?.toString();
+          final uContent = userMessage['content']?.toString() ?? '';
+          if (uId != null &&
+              uId.isNotEmpty &&
+              uContent.isNotEmpty &&
+              !existingClientIds.contains(uId)) {
+            await _dio.post(
+              '/api/v1/messages',
+              data: {
+                'role': 'user',
+                'content': uContent,
+                'topicId': conversationId,
+                'metadata': {'conduitClientId': uId},
+              },
+            );
+          }
+        }
+
+        await _dio.post(
+          '/api/v1/messages',
+          data: {
+            'role': 'assistant',
+            'content': content,
+            'topicId': conversationId,
+            'model': realModel,
+            'provider': ?realProvider,
+            if (reasoning != null && reasoning.isNotEmpty)
+              'reasoning': reasoning,
+            'metadata': {'conduitClientId': responseMessageId},
+          },
+        );
+      }
+
+      final jsonChoices = <String, dynamic>{
+        'id': responseMessageId,
+        'choices': [
+          {
+            'index': 0,
+            'message': {
+              'role': 'assistant',
+              'content': content,
+              if (reasoning != null && reasoning.isNotEmpty)
+                'reasoning_content': reasoning,
+            },
+            'finish_reason': 'stop',
+          }
+        ],
+        'usage': ?usage,
+      };
+
+      return ChatCompletionSession.jsonCompletion(
+        messageId: responseMessageId,
+        sessionId: sessionId,
+        conversationId: conversationId,
+        jsonPayload: jsonChoices,
+      );
+    }
+  }
+
+  Stream<List<int>> _wrapLobeResponseByteStream(
+    Stream<List<int>> byteStream, {
+    required LobeAgentCorrelation correlation,
+    required Future<void> Function() onStreamCompleted,
+  }) async* {
+    final scanner = SseFrameScanner();
+    final textStream = byteStream.cast<List<int>>().transform(utf8.decoder);
+
+    bool failureDetected = false;
+    String? failureMessage;
+    bool completedHandled = false;
+
+    await for (final chunk in textStream) {
+      for (final frame in scanner.addChunk(chunk)) {
+        final trimmed = frame.data.trim();
+        final eventType = frame.event?.trim().toLowerCase();
+
+        // Check for response.completed with status: failed
+        if (eventType == 'response.completed' ||
+            eventType == 'response.failed' ||
+            trimmed.contains('"status":"failed"') ||
+            trimmed.contains('"status": "failed"')) {
+          try {
+            final decoded = jsonDecode(trimmed);
+            if (decoded is Map) {
+              final status = decoded['status']?.toString() ??
+                  (decoded['response'] is Map
+                      ? (decoded['response'] as Map)['status']?.toString()
+                      : null);
+              if (status == 'failed') {
+                failureDetected = true;
+                failureMessage = decoded['error']?.toString() ??
+                    (decoded['response'] is Map
+                        ? (decoded['response'] as Map)['error']?.toString()
+                        : 'Response completed with status failed');
+              }
+            }
+          } catch (_) {}
+        }
+
+        if (failureDetected) {
+          throw SyncTerminalException(
+            statusCode: 500,
+            message: failureMessage ??
+                'LobeHub response completed with status: failed',
+          );
+        }
+
+        final isDoneFrame = trimmed == '[DONE]' ||
+            eventType == 'response.completed' ||
+            eventType == 'done' ||
+            eventType == 'stop';
+
+        if (isDoneFrame && !completedHandled) {
+          completedHandled = true;
+          try {
+            await onStreamCompleted();
+          } catch (e) {
+            _traceApi('onStreamCompleted error: $e');
+          }
+        }
+
+        final buffer = StringBuffer();
+        if (frame.event != null) {
+          buffer.writeln('event: ${frame.event}');
+        }
+        for (final line in frame.data.split('\n')) {
+          buffer.writeln('data: $line');
+        }
+        buffer.writeln();
+        yield utf8.encode(buffer.toString());
+      }
+    }
+
+    for (final frame in scanner.close()) {
+      final trimmed = frame.data.trim();
+      final eventType = frame.event?.trim().toLowerCase();
+      final isDoneFrame = trimmed == '[DONE]' ||
+          eventType == 'response.completed' ||
+          eventType == 'done' ||
+          eventType == 'stop';
+
+      if (isDoneFrame && !completedHandled) {
+        completedHandled = true;
+        try {
+          await onStreamCompleted();
+        } catch (e) {
+          _traceApi('onStreamCompleted error: $e');
+        }
+      }
+
+      final buffer = StringBuffer();
+      if (frame.event != null) {
+        buffer.writeln('event: ${frame.event}');
+      }
+      for (final line in frame.data.split('\n')) {
+        buffer.writeln('data: $line');
+      }
+      buffer.writeln();
+      yield utf8.encode(buffer.toString());
+    }
+
+    if (!completedHandled) {
+      completedHandled = true;
+      try {
+        await onStreamCompleted();
+      } catch (e) {
+        _traceApi('onStreamCompleted error: $e');
+      }
+    }
   }
 }

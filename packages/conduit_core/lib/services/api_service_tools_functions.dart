@@ -3,6 +3,9 @@ part of 'api_service.dart';
 mixin _ToolsFunctionsApi on _ApiServiceBase {
   // Tools & Functions
   Future<List<Map<String, dynamic>>> getTools() async {
+    if (serverConfig.isLobeHub) {
+      return const [];
+    }
     _traceApi('Fetching tools');
     try {
       final response = await _dio.get('/api/v1/tools/');
@@ -16,6 +19,9 @@ mixin _ToolsFunctionsApi on _ApiServiceBase {
   }
 
   Future<List<WorkspaceToolSummary>> getWorkspaceTools() async {
+    if (serverConfig.isLobeHub) {
+      return const [];
+    }
     try {
       final response = await _dio.get('/api/v1/tools/list');
       return workspaceJsonList(response.data)
@@ -30,6 +36,9 @@ mixin _ToolsFunctionsApi on _ApiServiceBase {
   }
 
   Future<List<Map<String, dynamic>>> getFunctions() async {
+    if (serverConfig.isLobeHub) {
+      return const [];
+    }
     _traceApi('Fetching functions');
     try {
       final response = await _dio.get('/api/v1/functions/');
@@ -49,6 +58,7 @@ mixin _ToolsFunctionsApi on _ApiServiceBase {
   Future<WorkspaceToolDetail?> createWorkspaceTool(
     WorkspaceToolForm form,
   ) async {
+    if (serverConfig.isLobeHub) return null;
     final response = await _dio.post(
       '/api/v1/tools/create',
       data: form.toJson(),
@@ -62,6 +72,7 @@ mixin _ToolsFunctionsApi on _ApiServiceBase {
 
   // Enhanced Tools Management Operations
   Future<Map<String, dynamic>> getTool(String toolId) async {
+    if (serverConfig.isLobeHub) return <String, dynamic>{};
     _traceApi('Fetching tool details: $toolId');
     final response = await _dio.get('/api/v1/tools/id/$toolId');
     return response.data as Map<String, dynamic>;
@@ -71,6 +82,7 @@ mixin _ToolsFunctionsApi on _ApiServiceBase {
     String toolId,
     WorkspaceToolForm form,
   ) async {
+    if (serverConfig.isLobeHub) return null;
     final response = await _dio.post(
       '/api/v1/tools/id/$toolId/update',
       data: form.toJson(),
@@ -86,6 +98,7 @@ mixin _ToolsFunctionsApi on _ApiServiceBase {
     String toolId,
     List<WorkspaceAccessGrantInput> grants,
   ) async {
+    if (serverConfig.isLobeHub) return null;
     final response = await _dio.post(
       '/api/v1/tools/id/$toolId/access/update',
       data: {'access_grants': workspaceGrantInputs(grants)},
@@ -98,17 +111,20 @@ mixin _ToolsFunctionsApi on _ApiServiceBase {
   }
 
   Future<void> deleteTool(String toolId) async {
+    if (serverConfig.isLobeHub) return;
     _traceApi('Deleting tool: $toolId');
     await _dio.delete('/api/v1/tools/id/$toolId/delete');
   }
 
   Future<Map<String, dynamic>> getToolValves(String toolId) async {
+    if (serverConfig.isLobeHub) return <String, dynamic>{};
     _traceApi('Fetching tool valves: $toolId');
     final response = await _dio.get('/api/v1/tools/id/$toolId/valves');
     return response.data as Map<String, dynamic>;
   }
 
   Future<WorkspaceValveSpec?> getToolValvesSpec(String toolId) async {
+    if (serverConfig.isLobeHub) return null;
     final response = await _dio.get('/api/v1/tools/id/$toolId/valves/spec');
     return response.data is Map
         ? WorkspaceValveSpec.fromJson(
@@ -121,6 +137,7 @@ mixin _ToolsFunctionsApi on _ApiServiceBase {
     String toolId,
     Map<String, dynamic> valves,
   ) async {
+    if (serverConfig.isLobeHub) return <String, dynamic>{};
     _traceApi('Updating tool valves: $toolId');
     final response = await _dio.post(
       '/api/v1/tools/id/$toolId/valves/update',
@@ -130,12 +147,14 @@ mixin _ToolsFunctionsApi on _ApiServiceBase {
   }
 
   Future<Map<String, dynamic>> getUserToolValves(String toolId) async {
+    if (serverConfig.isLobeHub) return <String, dynamic>{};
     _traceApi('Fetching user tool valves: $toolId');
     final response = await _dio.get('/api/v1/tools/id/$toolId/valves/user');
     return response.data as Map<String, dynamic>;
   }
 
   Future<WorkspaceValveSpec?> getUserToolValvesSpec(String toolId) async {
+    if (serverConfig.isLobeHub) return null;
     final response = await _dio.get(
       '/api/v1/tools/id/$toolId/valves/user/spec',
     );
@@ -150,6 +169,7 @@ mixin _ToolsFunctionsApi on _ApiServiceBase {
     String toolId,
     Map<String, dynamic> valves,
   ) async {
+    if (serverConfig.isLobeHub) return <String, dynamic>{};
     _traceApi('Updating user tool valves: $toolId');
     final response = await _dio.post(
       '/api/v1/tools/id/$toolId/valves/user/update',
@@ -159,6 +179,7 @@ mixin _ToolsFunctionsApi on _ApiServiceBase {
   }
 
   Future<List<Map<String, dynamic>>> exportTools() async {
+    if (serverConfig.isLobeHub) return const [];
     _traceApi('Exporting tools configuration');
     final response = await _dio.get('/api/v1/tools/export');
     final data = response.data;
@@ -169,6 +190,7 @@ mixin _ToolsFunctionsApi on _ApiServiceBase {
   }
 
   Future<Map<String, dynamic>> loadToolFromUrl(String url) async {
+    if (serverConfig.isLobeHub) return <String, dynamic>{};
     _traceApi('Loading tool from URL: $url');
     final response = await _dio.post(
       '/api/v1/tools/load/url',

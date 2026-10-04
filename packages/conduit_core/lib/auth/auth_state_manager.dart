@@ -1976,10 +1976,12 @@ class AuthStateManager extends _$AuthStateManager {
   bool _isConfirmedAuthFailure(Object error) {
     if (error is DioException) {
       final statusCode = error.response?.statusCode;
+      if (statusCode == 404) return false;
       return statusCode == 401 || statusCode == 403;
     }
 
     final text = error.toString();
+    if (text.contains('404') || text.contains('Not Found')) return false;
     return text.contains('401') ||
         text.contains('403') ||
         text.contains('Unauthorized') ||

@@ -40,11 +40,12 @@ Future<User?> currentUser(Ref ref) async {
   final cachedOwnerMatches =
       cachedUser != null &&
       token != null &&
-      openWebUiAccountOwnerMarkerMatches(
-        marker: marker,
-        token: token,
-        userId: cachedUser.id,
-      );
+      (api.serverConfig.isLobeHub ||
+          openWebUiAccountOwnerMarkerMatches(
+            marker: marker,
+            token: token,
+            userId: cachedUser.id,
+          ));
   if (cachedOwnerMatches) {
     final lastRefresh = ref.read(_lastUserRefreshProvider);
     final now = DateTime.now();

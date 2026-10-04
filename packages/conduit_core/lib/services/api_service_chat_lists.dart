@@ -3,6 +3,17 @@ part of 'api_service.dart';
 mixin _ChatListsApi on _ApiServiceBase {
   // Search conversations
   Future<List<Conversation>> searchConversations(String query) async {
+    if (serverConfig.isLobeHub) {
+      final list = await fetchLobeHubTopicListPageRaw(_dio, page: 1);
+      final filtered = list.where((t) {
+        final title = t['title']?.toString().toLowerCase() ?? '';
+        return title.contains(query.toLowerCase());
+      }).toList();
+      return await _parseConversationSummaryPayload(
+        regular: Uint8List.fromList(utf8.encode(jsonEncode(filtered))),
+        debugLabel: 'parse_search_lobehub',
+      );
+    }
     final response = await _dio.get(
       '/api/v1/chats/search',
       queryParameters: {'q': query},
@@ -35,6 +46,10 @@ mixin _ChatListsApi on _ApiServiceBase {
     String? sortBy,
     String? sortOrder,
   }) async {
+    if (serverConfig.isLobeHub) {
+      if (query == null || query.isEmpty) return const [];
+      return searchConversations(query);
+    }
     _traceApi('Searching chats with query: $query');
     final queryParams = <String, dynamic>{};
     // OpenAPI expects 'text' for this endpoint; keep extras if server tolerates them
@@ -79,6 +94,21 @@ mixin _ChatListsApi on _ApiServiceBase {
     int? limit,
     int? offset,
   }) async {
+    if (serverConfig.isLobeHub) {
+      final resp = await _dio.get(
+        '/api/v1/messages',
+        queryParameters: {
+          'search': query,
+          'topicId': ?chatId,
+          'pageSize': ?limit,
+        },
+      );
+      final list = _extractLobeMessagesList(resp.data);
+      return list
+          .whereType<Map>()
+          .map((m) => Map<String, dynamic>.from(m))
+          .toList();
+    }
     _traceApi('Searching messages with query: $query');
 
     // Build query parameters; include both 'text' and 'query' for compatibility

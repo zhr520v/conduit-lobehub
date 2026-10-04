@@ -3,6 +3,23 @@ part of 'api_service.dart';
 mixin _ChatsApi on _ApiServiceBase {
   // Parse OpenWebUI chat format to our Conversation format
   Future<Conversation> getConversation(String id) async {
+    if (serverConfig.isLobeHub) {
+      final raw = await fetchLobeHubChatRaw(_dio, id);
+      if (raw == null) {
+        throw DioException(
+          requestOptions: RequestOptions(path: '/api/v1/topics/$id'),
+          response: Response(
+            requestOptions: RequestOptions(path: '/api/v1/topics/$id'),
+            statusCode: 404,
+          ),
+          type: DioExceptionType.badResponse,
+        );
+      }
+      return _parseConversationPayload(
+        Uint8List.fromList(utf8.encode(jsonEncode(raw))),
+        debugLabel: 'parse_conversation_lobehub',
+      );
+    }
     DebugLogger.log('fetch', scope: 'api/chat', data: {'id': id});
     final response = await _dio.get(
       '/api/v1/chats/$id',
@@ -25,6 +42,36 @@ mixin _ChatsApi on _ApiServiceBase {
     String? systemPrompt,
     String? folderId,
   }) async {
+    if (serverConfig.isLobeHub) {
+      final topicResp = await _dio.post(
+        '/api/v1/topics',
+        data: {
+          'title': title,
+          'groupId': ?folderId,
+        },
+      );
+      final topicData = topicResp.data is Map
+          ? (topicResp.data['data'] is Map
+              ? topicResp.data['data']
+              : topicResp.data)
+          : <String, dynamic>{};
+      final newTopicId = topicData['id']?.toString() ??
+          'tpc_${DateTime.now().millisecondsSinceEpoch}';
+
+      for (final msg in messages) {
+        await _dio.post(
+          '/api/v1/messages',
+          data: {
+            'role': msg.role,
+            'content': msg.content,
+            'topicId': newTopicId,
+            if (msg.model != null) 'model': msg.model,
+            'metadata': {'conduitClientId': msg.id},
+          },
+        );
+      }
+      return getConversation(newTopicId);
+    }
     _traceApi('Creating new conversation on OpenWebUI server');
     _traceApi('Title: $title, Messages: ${messages.length}');
 
@@ -201,6 +248,12 @@ mixin _ChatsApi on _ApiServiceBase {
     String? title,
     String? systemPrompt,
   }) async {
+    if (serverConfig.isLobeHub) {
+      if (title != null && title.isNotEmpty) {
+        await _dio.patch('/api/v1/topics/$id', data: {'title': title});
+      }
+      return;
+    }
     // OpenWebUI expects POST to /api/v1/chats/{id} with ChatForm { chat: {...} }
     final chatPayload = <String, dynamic>{
       'title': ?title,
@@ -218,6 +271,10 @@ mixin _ChatsApi on _ApiServiceBase {
 
   // Pin/Unpin conversation
   Future<void> pinConversation(String id, bool pinned) async {
+    if (serverConfig.isLobeHub) {
+      await _dio.patch('/api/v1/topics/$id', data: {'favorite': pinned});
+      return;
+    }
     _traceApi('${pinned ? 'Pinning' : 'Unpinning'} conversation: $id');
     await _setConversationToggle(
       id: id,
@@ -229,6 +286,9 @@ mixin _ChatsApi on _ApiServiceBase {
 
   // Archive/Unarchive conversation
   Future<void> archiveConversation(String id, bool archived) async {
+    if (serverConfig.isLobeHub) {
+      return;
+    }
     _traceApi('${archived ? 'Archiving' : 'Unarchiving'} conversation: $id');
     await _setConversationToggle(
       id: id,

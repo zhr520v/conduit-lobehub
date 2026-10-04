@@ -67,3 +67,8 @@ extension ServerConfigTls on ServerConfig {
   bool get needsCustomTlsClient =>
       allowSelfSignedCertificates || hasMutualTlsCredentials;
 }
+
+extension ServerConfigBackend on ServerConfig {
+  /// Whether this server is a LobeHub instance identified by its onboarding ID.
+  bool get isLobeHub => id == 'lobehub_self_hosted';
+}

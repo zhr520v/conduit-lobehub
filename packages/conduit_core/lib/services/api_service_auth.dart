@@ -113,6 +113,53 @@ mixin _AuthApi on _ApiServiceBase {
       ApiAuthInterceptor.candidateAuthTokenExtraKey: ?candidateAuthToken,
       ApiAuthInterceptor.authSnapshotExtraKey: ?authSnapshot,
     };
+    if (serverConfig.isLobeHub) {
+      Response<dynamic> response;
+      try {
+        response = await _dio.get(
+          '/api/v1/users/me',
+          options: extra.isEmpty ? null : Options(extra: extra),
+        );
+      } on DioException catch (e) {
+        if (e.response?.statusCode == 404) {
+          response = await _dio.get(
+            '/api/v1/user',
+            options: extra.isEmpty ? null : Options(extra: extra),
+          );
+        } else {
+          rethrow;
+        }
+      }
+      DebugLogger.log('user-info', scope: 'api/user');
+      final data = response.data;
+      final rawMap =
+          data is Map ? Map<String, dynamic>.from(data) : <String, dynamic>{};
+      final userMap = rawMap['data'] is Map
+          ? Map<String, dynamic>.from(rawMap['data'] as Map)
+          : rawMap['user'] is Map
+              ? Map<String, dynamic>.from(rawMap['user'] as Map)
+              : rawMap;
+      final id = userMap['id']?.toString() ?? 'lobehub_user';
+      final username = userMap['fullName']?.toString() ??
+          userMap['full_name']?.toString() ??
+          userMap['username']?.toString() ??
+          userMap['name']?.toString() ??
+          'User';
+      final email = userMap['email']?.toString() ?? 'user@lobehub';
+      final role = userMap['role']?.toString() ?? 'user';
+      final avatar = userMap['avatar']?.toString() ??
+          userMap['avatarUrl']?.toString() ??
+          userMap['avatar_url']?.toString() ??
+          userMap['profile_image_url']?.toString();
+      return User(
+        id: id.isNotEmpty ? id : 'lobehub_user',
+        username: username,
+        name: username,
+        email: email,
+        role: role,
+        profileImage: avatar,
+      );
+    }
     final response = await _dio.get(
       '/api/v1/auths/',
       options: extra.isEmpty ? null : Options(extra: extra),
@@ -122,6 +169,17 @@ mixin _AuthApi on _ApiServiceBase {
   }
 
   Future<AccountMetadata> getAccountMetadata() async {
+    if (serverConfig.isLobeHub) {
+      final user = await getCurrentUser();
+      return AccountMetadata(
+        id: user.id,
+        email: user.email,
+        name: user.name ?? user.username,
+        role: user.role,
+        isActive: true,
+        profileImageUrl: user.profileImage,
+      );
+    }
     final results = await Future.wait<dynamic>([
       _dio.get('/api/v1/auths/').then((response) => response.data),
       (() async {
@@ -145,7 +203,7 @@ mixin _AuthApi on _ApiServiceBase {
   }
 
   Future<void> updateUserInfo(Map<String, Object?> info) async {
-    if (info.isEmpty) {
+    if (serverConfig.isLobeHub || info.isEmpty) {
       return;
     }
     _traceApi('Updating user info');
@@ -160,6 +218,9 @@ mixin _AuthApi on _ApiServiceBase {
     String? dateOfBirth,
     String? timezone,
   }) async {
+    if (serverConfig.isLobeHub) {
+      return getAccountMetadata();
+    }
     final trimmedName = name.trim();
     if (trimmedName.isEmpty) {
       throw ArgumentError('name cannot be empty');
@@ -190,6 +251,9 @@ mixin _AuthApi on _ApiServiceBase {
     required String password,
     required String newPassword,
   }) async {
+    if (serverConfig.isLobeHub) {
+      throw UnsupportedError('Password update is not supported on LobeHub');
+    }
     await _dio.post(
       '/api/v1/auths/update/password',
       data: {'password': password, 'new_password': newPassword},
@@ -198,6 +262,9 @@ mixin _AuthApi on _ApiServiceBase {
 
   Future<WorkspacePagedResponse<WorkspacePrincipalPreview>>
   searchWorkspaceUsers(String query, {int page = 1}) async {
+    if (serverConfig.isLobeHub) {
+      return const WorkspacePagedResponse(items: [], total: 0);
+    }
     final response = await _dio.get(
       '/api/v1/users/search',
       queryParameters: {'query': query, 'page': page},
@@ -209,6 +276,9 @@ mixin _AuthApi on _ApiServiceBase {
   }
 
   Future<List<WorkspacePrincipalPreview>> getWorkspaceGroups() async {
+    if (serverConfig.isLobeHub) {
+      return const [];
+    }
     final response = await _dio.get('/api/v1/groups/');
     return workspaceJsonList(response.data)
         .map(WorkspacePrincipalPreview.group)
@@ -217,6 +287,9 @@ mixin _AuthApi on _ApiServiceBase {
 
   // Permissions & Features
   Future<Map<String, dynamic>> getUserPermissions() async {
+    if (serverConfig.isLobeHub) {
+      return <String, dynamic>{};
+    }
     _traceApi('Fetching user permissions');
     try {
       final response = await _dio.get('/api/v1/users/permissions');

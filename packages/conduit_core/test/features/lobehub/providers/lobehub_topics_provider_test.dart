@@ -521,6 +521,19 @@ void main() {
             serverDeleteCalled = true;
             return jsonResponse({'success': true});
           }
+          if (options.path.endsWith('/api/v1/topics') && options.method == 'GET') {
+            return jsonResponse([
+              sampleTopic1.toJson(),
+              sampleTopic2.toJson(),
+            ]);
+          }
+          if (options.path.endsWith('/api/v1/messages') && options.method == 'GET') {
+            final topicId = options.queryParameters['topicId'];
+            if (topicId == 'topic_2') {
+              return jsonResponse([sampleMessage2.toJson()]);
+            }
+            return jsonResponse([sampleMessage1.toJson()]);
+          }
           return jsonResponse({});
         },
       );
@@ -543,6 +556,7 @@ void main() {
 
       final notifier = container.read(lobeTopicsProvider.notifier);
       await notifier.loadTopics();
+      await notifier.selectTopic('topic_2');
       await notifier.selectTopic('topic_1');
 
       expect(container.read(lobeTopicsProvider).activeTopicId, equals('topic_1'));
@@ -564,7 +578,12 @@ void main() {
 
     test('deleteTopic clears activeTopicId when last topic is deleted', () async {
       final (client, _) = createTestApiClient(
-        handler: (options, cancelFuture) => jsonResponse({'success': true}),
+        handler: (options, cancelFuture) {
+          if (options.path.endsWith('/api/v1/topics') && options.method == 'GET') {
+            return jsonResponse([sampleTopic1.toJson()]);
+          }
+          return jsonResponse({'success': true});
+        },
       );
 
       final localCache = InMemoryLobeTopicsCache(

@@ -21,6 +21,9 @@ mixin _UserSettingsApi on _ApiServiceBase {
   Future<Map<String, dynamic>> getUserSettings({
     ApiAuthSnapshot? authSnapshot,
   }) async {
+    if (serverConfig.isLobeHub) {
+      return <String, dynamic>{};
+    }
     _traceApi('Fetching user settings');
     try {
       final response = await _dio.get(
@@ -45,6 +48,9 @@ mixin _UserSettingsApi on _ApiServiceBase {
     Map<String, dynamic> settings, {
     ApiAuthSnapshot? authSnapshot,
   }) async {
+    if (serverConfig.isLobeHub) {
+      return;
+    }
     _traceApi('Updating user settings');
     // Align with web client update route
     await _postUserSettings(settings, authSnapshot: authSnapshot);
@@ -52,10 +58,16 @@ mixin _UserSettingsApi on _ApiServiceBase {
 
   @override
   Future<ServerUserSettings> getServerUserSettingsModel() async {
+    if (serverConfig.isLobeHub) {
+      return const ServerUserSettings();
+    }
     return ServerUserSettings.fromJson(await getUserSettings());
   }
 
   Future<ServerUserSettings> updateUserSystemPrompt(String? systemPrompt) {
+    if (serverConfig.isLobeHub) {
+      return Future.value(const ServerUserSettings());
+    }
     final authSnapshot = captureAuthSnapshot();
     return serializeUserSettingsMutation(() async {
       final settings = _deepCloneJsonMap(
@@ -86,6 +98,9 @@ mixin _UserSettingsApi on _ApiServiceBase {
   }
 
   Future<ServerUserSettings> updateUserReasoningEffort(String? effort) {
+    if (serverConfig.isLobeHub) {
+      return Future.value(const ServerUserSettings());
+    }
     final authSnapshot = captureAuthSnapshot();
     return serializeUserSettingsMutation(() async {
       final settings = _deepCloneJsonMap(
@@ -114,6 +129,9 @@ mixin _UserSettingsApi on _ApiServiceBase {
   }
 
   Future<ServerUserSettings> updateUserMemoryEnabled(bool enabled) {
+    if (serverConfig.isLobeHub) {
+      return Future.value(const ServerUserSettings());
+    }
     final authSnapshot = captureAuthSnapshot();
     return serializeUserSettingsMutation(() async {
       final settings = _deepCloneJsonMap(
@@ -140,6 +158,9 @@ mixin _UserSettingsApi on _ApiServiceBase {
     bool? notificationSound,
     bool? notificationSoundAlways,
   }) {
+    if (serverConfig.isLobeHub) {
+      return Future.value(const ServerUserSettings());
+    }
     final authSnapshot = captureAuthSnapshot();
     return serializeUserSettingsMutation(() async {
       final settings = _deepCloneJsonMap(
@@ -166,6 +187,9 @@ mixin _UserSettingsApi on _ApiServiceBase {
   }
 
   Future<ServerUserSettings> updateUserPinnedModels(List<String> modelIds) {
+    if (serverConfig.isLobeHub) {
+      return Future.value(const ServerUserSettings());
+    }
     final authSnapshot = captureAuthSnapshot();
     return serializeUserSettingsMutation(() async {
       final settings = _deepCloneJsonMap(
@@ -186,6 +210,9 @@ mixin _UserSettingsApi on _ApiServiceBase {
 
   // Memory & Notes
   Future<List<ServerMemory>> getMemories() async {
+    if (serverConfig.isLobeHub) {
+      return const <ServerMemory>[];
+    }
     _traceApi('Fetching memories');
     final response = await _dio.get('/api/v1/memories/');
     final data = response.data;
@@ -199,6 +226,9 @@ mixin _UserSettingsApi on _ApiServiceBase {
   }
 
   Future<ServerMemory> createMemory({required String content}) async {
+    if (serverConfig.isLobeHub) {
+      throw UnsupportedError('Memories are not supported on LobeHub');
+    }
     _traceApi('Creating memory');
     final response = await _dio.post(
       '/api/v1/memories/add',
@@ -215,6 +245,9 @@ mixin _UserSettingsApi on _ApiServiceBase {
     required String memoryId,
     required String content,
   }) async {
+    if (serverConfig.isLobeHub) {
+      throw UnsupportedError('Memories are not supported on LobeHub');
+    }
     _traceApi('Updating memory');
     final response = await _dio.post(
       '/api/v1/memories/$memoryId/update',
@@ -228,11 +261,17 @@ mixin _UserSettingsApi on _ApiServiceBase {
   }
 
   Future<void> deleteMemory(String memoryId) async {
+    if (serverConfig.isLobeHub) {
+      return;
+    }
     _traceApi('Deleting memory');
     await _dio.delete('/api/v1/memories/$memoryId');
   }
 
   Future<void> clearAllMemories() async {
+    if (serverConfig.isLobeHub) {
+      return;
+    }
     _traceApi('Clearing all memories');
     await _dio.delete('/api/v1/memories/delete/user');
   }
