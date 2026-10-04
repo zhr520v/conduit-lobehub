@@ -13,19 +13,26 @@ void main() {
   group('LobeHub Chat Persistence & Message Deduplication', () {
     late _MockHttpClientAdapter adapter;
     late ApiService lobeApi;
+    late WorkerManager workers;
 
     setUp(() {
       adapter = _MockHttpClientAdapter();
+      workers = WorkerManager();
       lobeApi = ApiService(
         serverConfig: const ServerConfig(
           id: 'lobehub_self_hosted',
           name: 'LobeHub Test',
           url: 'http://localhost:3210',
         ),
-        workerManager: WorkerManager(),
+        workerManager: workers,
       );
       lobeApi.dio.httpClientAdapter = adapter;
       lobeApi.dio.interceptors.clear();
+    });
+
+    tearDown(() {
+      lobeApi.dispose();
+      workers.dispose();
     });
 
     test('getChatRaw maps incoming server id via metadata.conduitClientId and preserves metadata serverMessageId', () async {
@@ -97,7 +104,7 @@ void main() {
       check(asstMsg['meta']['serverMessageId']).equals('srv_a_456');
       check(asstMsg['meta']['customKey']).equals('preserved_value');
       check(asstMsg['reasoning']).equals('Let me greet the user');
-      check(asstMsg['parentId']).equals('srv_u_123');
+      check(asstMsg['parentId']).equals('client_u_local_1');
     });
 
     test('createChatRaw queries server before writing and avoids duplicating existing messages', () async {
@@ -282,6 +289,8 @@ void main() {
                 'id': 'new_srv_asst_2',
                 'role': 'assistant',
                 'content': 'Roses are red...',
+                'model': 'gpt-4o',
+                'provider': 'openai',
                 'parentId': 'new_srv_user_2',
                 'metadata': {'tokens': 15},
               },
@@ -427,6 +436,11 @@ void main() {
           return _jsonResponse({'success': true});
         },
       );
+      adapter.registerHandler(
+        method: 'GET',
+        path: '/api/v1/topics/tpc_move',
+        handler: (_) => _jsonResponse({'data': {'id': 'tpc_move', 'groupId': 'grp_1'}}),
+      );
       await lobeApi.moveChatToFolderRaw('tpc_move', 'grp_1');
       check(adapter.requestedPaths).contains('/api/v1/topics/tpc_move');
     });
@@ -561,6 +575,40 @@ void main() {
       check(postedMessages.single['metadata']?['conduitClientId'])
           .equals('cid_truly_new');
     });
+
+    test('history dedup recognizes server IDs and skips unfinished or local errors', () async {
+      adapter.registerHandler(method: 'POST', path: '/api/v1/topics', handler: (_) => _jsonResponse({'data': {'id': 'topic'}}));
+      adapter.registerHandler(method: 'GET', path: '/api/v1/messages', handler: (_) => _jsonResponse({'data': {'messages': [
+        {'id': 'server-history', 'role': 'assistant', 'content': 'Existing'},
+        {'id': 'server-alias', 'role': 'assistant', 'content': 'Aliased'},
+      ]}}));
+      final uploaded = <Map<String, dynamic>>[];
+      adapter.registerHandler(method: 'POST', path: '/api/v1/messages', handler: (options) {
+        uploaded.add(options.data as Map<String, dynamic>);
+        return _jsonResponse({'data': {'id': 'uploaded'}});
+      });
+      await lobeApi.createChatRaw({'messages': [
+        {'id': 'server-history', 'role': 'assistant', 'content': 'Existing', 'done': true},
+        {'id': 'local-alias', 'role': 'assistant', 'content': 'Aliased', 'done': true, 'meta': {'serverMessageId': 'server-alias'}},
+        {'id': 'empty', 'role': 'assistant', 'content': ''},
+        {'id': 'streaming', 'role': 'assistant', 'content': 'Partial', 'isStreaming': true},
+        {'id': 'unfinished', 'role': 'assistant', 'content': 'Partial', 'done': false},
+        {'id': 'failed', 'role': 'assistant', 'content': 'Error text', 'metadata': {'terminal': true}, 'error': {'content': 'failed'}},
+        {'id': 'finished', 'role': 'assistant', 'content': 'Final answer', 'done': true},
+      ]});
+      check(uploaded.length).equals(1);
+      check(uploaded.single['metadata']['conduitClientId']).equals('finished');
+    });
+
+    test('finished Agent pair awaiting correlation remains Responses-owned', () async {
+      adapter.registerHandler(method: 'POST', path: '/api/v1/topics', handler: (_) => _jsonResponse({'data': {'id': 'topic', 'agentId': 'agent'}}));
+      adapter.registerHandler(method: 'GET', path: '/api/v1/messages', handler: (_) => _jsonResponse({'data': {'messages': []}}));
+      await lobeApi.createChatRaw({'messages': [
+        {'id': 'user', 'role': 'user', 'content': 'Prompt', 'done': true},
+        {'id': 'assistant', 'parentId': 'user', 'role': 'assistant', 'content': 'Final', 'done': true, 'metadata': {'completionSubmitted': true, 'lobeAgentCorrelation': {'topicId': 'topic'}}},
+      ]});
+      check(adapter.requests.where((r) => r.method == 'POST' && r.path == '/api/v1/messages').length).equals(0);
+    });
   });
 }
 
@@ -591,7 +639,7 @@ class _MockHttpClientAdapter implements HttpClientAdapter {
     if (handler != null) {
       return handler(options);
     }
-    return _jsonResponse({});
+    throw StateError('Unexpected fixture route: $key');
   }
 
   @override

@@ -142,9 +142,14 @@ mixin _ChatsRawApi on _ApiServiceBase {
   Future<Map<String, dynamic>> createChatRaw(
     Map<String, dynamic> chatBlob, {
     String? folderId,
+    bool deferMessageUpload = false,
   }) async {
     if (serverConfig.isLobeHub) {
-      return _createLobeHubChatRaw(chatBlob, folderId: folderId);
+      return _createLobeHubChatRaw(
+        chatBlob,
+        folderId: folderId,
+        deferMessageUpload: deferMessageUpload,
+      );
     }
     try {
       final response = await _dio.post(
@@ -414,6 +419,7 @@ mixin _ChatsRawApi on _ApiServiceBase {
   Future<Map<String, dynamic>> _createLobeHubChatRaw(
     Map<String, dynamic> chatBlob, {
     String? folderId,
+    required bool deferMessageUpload,
   }) async {
     final title = (chatBlob['title'] as String?)?.trim() ??
         (chatBlob['chat'] is Map
@@ -437,19 +443,26 @@ mixin _ChatsRawApi on _ApiServiceBase {
     final topicData = topicResp.data is Map
         ? (topicResp.data['data'] is Map ? topicResp.data['data'] : topicResp.data)
         : <String, dynamic>{};
-    final newTopicId = topicData['id']?.toString() ??
-        'tpc_${DateTime.now().millisecondsSinceEpoch}';
+    final newTopicId = topicData['id'];
+    if ((topicResp.data is Map && topicResp.data['success'] == false) ||
+        newTopicId is! String || newTopicId.trim().isEmpty) {
+      throw const SyncTerminalException(
+        statusCode: 502,
+        message: 'LobeHub topic creation did not return a successful topic ID.',
+      );
+    }
 
     final verifiedAgentId = topicData['agentId']?.toString() ?? agentId;
     final isAgentTopic =
         verifiedAgentId != null && verifiedAgentId.isNotEmpty;
 
-    await _persistLobeHubMessagesFromBlob(
-      topicId: newTopicId,
-      chatBlob: chatBlob,
-      isAgentTopic: isAgentTopic,
-      agentId: verifiedAgentId,
-    );
+    if (!deferMessageUpload) {
+      await persistLobeHubChatMessages(
+        topicId: newTopicId,
+        chatBlob: chatBlob,
+        agentId: isAgentTopic ? verifiedAgentId : null,
+      );
+    }
 
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     return {
@@ -496,11 +509,10 @@ mixin _ChatsRawApi on _ApiServiceBase {
 
     final isAgentTopic = agentId != null && agentId.isNotEmpty;
 
-    await _persistLobeHubMessagesFromBlob(
+    final persistedMessageIds = await persistLobeHubChatMessages(
       topicId: id,
       chatBlob: chat,
-      isAgentTopic: isAgentTopic,
-      agentId: agentId,
+      agentId: isAgentTopic ? agentId : null,
     );
 
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -510,13 +522,13 @@ mixin _ChatsRawApi on _ApiServiceBase {
       'updated_at': now,
       'created_at': now,
       'chat': chat,
+      'conduitPersistedMessageIds': persistedMessageIds.toList(),
     };
   }
 
-  Future<void> _persistLobeHubMessagesFromBlob({
+  Future<Set<String>> persistLobeHubChatMessages({
     required String topicId,
     required Map<String, dynamic> chatBlob,
-    required bool isAgentTopic,
     String? agentId,
   }) async {
     final chatMap =
@@ -530,13 +542,13 @@ mixin _ChatsRawApi on _ApiServiceBase {
       rawMessages = chatMap['messages'] as List;
     }
 
-    if (rawMessages.isEmpty) return;
+    if (rawMessages.isEmpty) return const {};
 
     final messageList = rawMessages
         .whereType<Map>()
         .map((m) => Map<String, dynamic>.from(m))
         .toList();
-    if (messageList.isEmpty) return;
+    if (messageList.isEmpty) return const {};
 
     messageList.sort((a, b) {
       final tA = a['timestamp'] ?? a['created_at'] ?? 0;
@@ -545,23 +557,33 @@ mixin _ChatsRawApi on _ApiServiceBase {
       return 0;
     });
 
-    int suppressStartIndex = -1;
-    if (isAgentTopic) {
-      for (int i = 0; i < messageList.length; i++) {
-        final m = messageList[i];
-        final role = m['role']?.toString();
-        final isDone = m['done'] == true;
-        if (role == 'assistant' && !isDone) {
-          int userIdx = i - 1;
-          while (userIdx >= 0 && messageList[userIdx]['role'] != 'user') {
-            userIdx--;
+    final suppressedIds = <String>{};
+    final isAgentTopic = agentId != null && agentId.isNotEmpty;
+    for (var index = 0; index < messageList.length; index++) {
+      final message = messageList[index];
+      final metadata = message['metadata'] ?? message['meta'];
+      final awaitingCorrelation = metadata is Map &&
+          metadata['lobeAgentCorrelation'] is Map &&
+          metadata['serverMessageId'] == null;
+      if (message['role'] == 'assistant' &&
+          ((isAgentTopic && message['done'] != true) ||
+              message['content'] == '' ||
+              message['done'] == false ||
+              message['isStreaming'] == true ||
+              message['error'] != null ||
+              (metadata is Map && metadata['terminal'] == true) ||
+              awaitingCorrelation)) {
+        suppressedIds.add(message['id']?.toString() ?? '');
+        final parentId = message['parentId']?.toString();
+        if (parentId != null) {
+          suppressedIds.add(parentId);
+        } else {
+          for (var previous = index - 1; previous >= 0; previous--) {
+            if (messageList[previous]['role'] == 'user') {
+              suppressedIds.add(messageList[previous]['id']?.toString() ?? '');
+              break;
+            }
           }
-          if (userIdx >= 0) {
-            suppressStartIndex = userIdx;
-          } else {
-            suppressStartIndex = i;
-          }
-          break;
         }
       }
     }
@@ -569,7 +591,10 @@ mixin _ChatsRawApi on _ApiServiceBase {
     final existingMessages =
         await fetchAllLobeHubMessages(_dio, topicId: topicId);
     final existingClientIds = <String>{};
+    final existingServerIds = <String>{};
     for (final em in existingMessages) {
+      final serverId = em['id']?.toString();
+      if (serverId != null) existingServerIds.add(serverId);
       final meta = em['metadata'] is Map
           ? em['metadata'] as Map
           : (em['meta'] is Map ? em['meta'] as Map : null);
@@ -577,19 +602,33 @@ mixin _ChatsRawApi on _ApiServiceBase {
       if (cid != null && cid.isNotEmpty) existingClientIds.add(cid);
     }
 
-    for (int i = 0; i < messageList.length; i++) {
-      if (suppressStartIndex >= 0 && i >= suppressStartIndex) {
-        break;
-      }
-      final m = messageList[i];
+    final persistedIds = <String>{};
+    for (final m in messageList) {
       final mId = m['id']?.toString() ?? '';
       if (mId.isEmpty) continue;
-      if (existingClientIds.contains(mId)) {
+      final messageMeta = m['metadata'] ?? m['meta'];
+      final serverMessageId = messageMeta is Map
+          ? messageMeta['serverMessageId']?.toString()
+          : null;
+      if (existingClientIds.contains(mId) ||
+          existingServerIds.contains(mId) ||
+          (serverMessageId != null &&
+              existingServerIds.contains(serverMessageId))) {
+        persistedIds.add(mId);
         continue;
       }
+      if (suppressedIds.contains(mId)) continue;
 
       final role = m['role']?.toString() ?? 'user';
       final content = m['content']?.toString() ?? '';
+      if (content.isEmpty ||
+          (role == 'assistant' &&
+              (m['done'] == false ||
+                  m['isStreaming'] == true ||
+                  m['error'] != null ||
+                  (messageMeta is Map && messageMeta['terminal'] == true)))) {
+        continue;
+      }
       final model = m['model']?.toString();
       final provider = m['provider']?.toString();
       final reasoning = m['reasoning']?.toString();
@@ -601,7 +640,7 @@ mixin _ChatsRawApi on _ApiServiceBase {
               : <String, dynamic>{});
       meta['conduitClientId'] = mId;
 
-      await _dio.post(
+      final response = await _dio.post(
         '/api/v1/messages',
         data: {
           'role': role,
@@ -615,7 +654,15 @@ mixin _ChatsRawApi on _ApiServiceBase {
           'metadata': meta,
         },
       );
+      if (response.data is Map && response.data['success'] == false) {
+        throw const SyncTerminalException(
+          statusCode: 502,
+          message: 'LobeHub rejected the message upload.',
+        );
+      }
       existingClientIds.add(mId);
+      persistedIds.add(mId);
     }
+    return persistedIds;
   }
 }
