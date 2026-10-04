@@ -9,10 +9,13 @@ import 'package:conduit_core/database/daos/outbox_dao.dart';
 import 'package:conduit_core/database/database_provider.dart';
 import 'package:conduit_core/models/chat_message.dart';
 import 'package:conduit_core/models/conversation.dart';
+import 'package:conduit_core/models/model.dart';
 import 'package:conduit_core/models/server_config.dart';
 import 'package:conduit_core/providers/app_providers.dart';
 import 'package:conduit_core/services/api_service.dart';
 import 'package:conduit_core/services/chat_completion_transport.dart';
+import 'package:conduit_core/sync/backoff.dart';
+import 'package:conduit_core/sync/clock.dart';
 import 'package:conduit_core/sync/outbox_drainer.dart';
 import 'package:conduit_core/sync/sync_api_client.dart';
 import 'package:conduit/features/chat/providers/chat_providers.dart';
@@ -42,7 +45,8 @@ void main() {
   });
 
   /// Builds the real [ChatRequestCompletionRunner] with a genuine [Ref] via a
-  /// throwaway provider, under the given overrides.
+  /// throwaway provider, under the given overrides. Headless model resolution
+  /// uses a concrete roster fixture instead of requiring Hive bootstrap.
   ({ProviderContainer container, RequestCompletionRunner runner}) makeRunner({
     bool? isStreaming,
     Conversation? active,
@@ -66,6 +70,7 @@ void main() {
           isChatStreamingProvider.overrideWithValue(isStreaming),
         chatMessagesProvider.overrideWith(() => _TestMessagesNotifier()),
         activeConversationProvider.overrideWith(() => _SeededActive(active)),
+        modelsProvider.overrideWith(() => _TestModels()),
         apiServiceProvider.overrideWithValue(apiService),
         socketServiceProvider.overrideWithValue(null),
         if (authSessionEpoch != null)
@@ -125,6 +130,15 @@ void main() {
     assistantMessageId: assistantId,
     model: 'model-1',
   ).toJson();
+
+  OutboxDrainer makeDrainer(RequestCompletionRunner runner) => OutboxDrainer(
+    db: db,
+    clock: const _TestSyncClock(),
+    backoff: Backoff(jitter: () => 0),
+    isOnline: () => true,
+    completion: runner,
+    adapters: const [],
+  );
 
   test('defers (throws CompletionBusyException) when a live stream owns the '
       'chat', () async {
@@ -857,10 +871,599 @@ void main() {
       check(row?.content).equals('prior partial content');
     },
   );
+
+  group('parked terminal settlement', () {
+    const cases = [
+      (
+        status: 404,
+        submitted: false,
+        message: 'The LobeHub topic no longer exists.',
+        visible: 'The LobeHub topic no longer exists.',
+      ),
+      (
+        status: 409,
+        submitted: false,
+        message: 'Ambiguous alias: Bearer synthetic-secret token=fixture',
+        visible: 'The request could not be completed.',
+      ),
+      (
+        status: 503,
+        submitted: false,
+        message: 'This completion cannot be executed by the Agent service.',
+        visible: 'This completion cannot be executed by the Agent service.',
+      ),
+      (
+        status: 400,
+        submitted: true,
+        message: 'The submitted stream was rejected.',
+        visible: 'The submitted stream was rejected.',
+      ),
+      (
+        status: 409,
+        submitted: true,
+        message: 'LobeHub could not reconcile this submitted turn.',
+        visible: 'LobeHub could not reconcile this submitted turn.',
+      ),
+      (
+        status: 500,
+        submitted: true,
+        message:
+            'response.failed: Bearer synthetic-secret Stack trace: #0 error',
+        visible: 'The request could not be completed.',
+      ),
+      (
+        status: 500,
+        submitted: true,
+        message: 'response.failed: Agent execution failed.',
+        visible: 'response.failed: Agent execution failed.',
+      ),
+    ];
+    for (final failure in cases) {
+      for (final targetIsActive in [true, false]) {
+        test(
+          'typed ${failure.status} ${failure.message == failure.visible ? 'safe message' : 'sanitized message'} ${failure.submitted ? 'with a barrier written during send' : 'before submission'} settles ${targetIsActive ? 'Drift and live target UI' : 'Drift without touching a colliding foreign UI'} without automatic re-POST',
+          () async {
+            const chatId = 'chat-parked';
+            const assistantId = 'asst-parked';
+            await seedChat(chatId);
+            await seedMessage(
+              chatId,
+              assistantId,
+              '',
+              payload: const <String, dynamic>{
+                'id': assistantId,
+                'role': 'assistant',
+                'content': '',
+                'isStreaming': true,
+              },
+            );
+            final seq = await db.transaction(
+              () => db.outboxDao.enqueue(
+                kind: OutboxKind.requestCompletion,
+                chatId: chatId,
+                payload: payload(assistantId),
+              ),
+            );
+            final correlation = LobeAgentCorrelation(
+              topicId: chatId,
+              agentId: 'fixture-agent',
+              userText: 'fixture prompt',
+              userLocalId: 'fixture-user',
+              assistantLocalId: assistantId,
+              snapshotServerIds: {'fixture-prior-server-message'},
+              createdAt: DateTime.utc(2026, 10, 4),
+            );
+            var sendCalls = 0;
+            final fakeApi = _FakeCompletionApiService(
+              preDispatchCorrelation: failure.submitted ? correlation : null,
+              onSendMessageSession: () async {
+                sendCalls++;
+                final sendingRow = await db.messagesDao.getMessage(
+                  chatId,
+                  assistantId,
+                );
+                final sendingPayload =
+                    jsonDecode(sendingRow!.payload) as Map<String, dynamic>;
+                final sendingMeta =
+                    sendingPayload['metadata'] as Map<String, dynamic>?;
+                expect(sendingPayload['isStreaming'], isTrue);
+                expect(sendingPayload['error'], isNull);
+                expect(sendingMeta?['terminal'], isNot(true));
+                expect(
+                  sendingMeta?['completionSubmitted'] == true,
+                  failure.submitted,
+                );
+                throw SyncTerminalException(
+                  statusCode: failure.status,
+                  message: failure.message,
+                );
+              },
+            );
+            final active = targetIsActive
+                ? conv(chatId)
+                : withChatStorageProvenance(
+                    conv(chatId),
+                    ChatStorageKind.directLocal,
+                  );
+            final (:container, :runner) = makeRunner(
+              active: active,
+              apiService: fakeApi,
+              recoveryAttempts: 1,
+              recoveryDelay: Duration.zero,
+            );
+            final initialMessages = [
+              ChatMessage(
+                id: assistantId,
+                role: 'assistant',
+                content: targetIsActive ? '' : 'foreign streaming bytes',
+                timestamp: DateTime.utc(2026, 10, 4),
+                isStreaming: true,
+              ),
+            ];
+            container
+                .read(chatMessagesProvider.notifier)
+                .setMessages(initialMessages);
+            final initialUi = jsonEncode(
+              initialMessages.map((message) => message.toJson()).toList(),
+            );
+            final drainer = makeDrainer(runner);
+
+            await drainer.drain();
+
+            final op = await (db.select(
+              db.outboxOps,
+            )..where((row) => row.seq.equals(seq))).getSingle();
+            expect(op.status, OutboxStatus.failed);
+            expect(op.attempts, 1);
+            final row = await db.messagesDao.getMessage(chatId, assistantId);
+            final settled = jsonDecode(row!.payload) as Map<String, dynamic>;
+            expect(settled['isStreaming'], isFalse);
+            expect((settled['error'] as Map)['content'], failure.visible);
+            final metadata = settled['metadata'] as Map<String, dynamic>;
+            expect(op.lastError, contains('(${failure.status})'));
+            expect(op.lastError, contains(failure.visible));
+            expect(op.lastError, isNot(contains('synthetic-secret')));
+            expect(row.content, isEmpty);
+            expect(settled['content'], isEmpty);
+            expect(metadata['completionSubmitted'], failure.submitted);
+            if (failure.submitted) {
+              expect(metadata['lobeAgentCorrelation'], correlation.toJson());
+              expect(metadata['terminal'], isNot(true));
+              expect(metadata['responseDone'], isTrue);
+              expect(settled['done'], isTrue);
+            } else {
+              expect(metadata['terminal'], isTrue);
+              expect(metadata['responseDone'], isNull);
+              expect(settled['done'], isNull);
+            }
+            final activeAssistant = container.read(chatMessagesProvider).single;
+            if (targetIsActive) {
+              expect(activeAssistant.isStreaming, isFalse);
+              expect(activeAssistant.error?.content, failure.visible);
+              expect(container.read(isChatStreamingProvider), isFalse);
+            } else {
+              expect(
+                jsonEncode(
+                  container
+                      .read(chatMessagesProvider)
+                      .map((message) => message.toJson())
+                      .toList(),
+                ),
+                initialUi,
+              );
+              expect(container.read(isChatStreamingProvider), isTrue);
+              expect(
+                chatStorageKindOf(container.read(activeConversationProvider)),
+                ChatStorageKind.directLocal,
+              );
+            }
+
+            await drainer.drain();
+            expect(sendCalls, 1);
+            if (failure.submitted) {
+              final (runner: restartedRunner, container: _) = makeRunner(
+                active: active,
+                apiService: fakeApi,
+                recoveryAttempts: 1,
+                recoveryDelay: Duration.zero,
+              );
+              await restartedRunner.run(
+                chatId: chatId,
+                payload: payload(assistantId),
+              );
+              expect(sendCalls, 1);
+              expect(
+                (await db.messagesDao.getMessage(chatId, assistantId))!.payload,
+                row.payload,
+              );
+              await db.outboxDao.requeueParked(seq, nowEpochSeconds: 1000);
+              await drainer.drain();
+              expect(sendCalls, 1);
+              expect(await db.select(db.outboxOps).get(), isEmpty);
+              expect(
+                (await db.messagesDao.getMessage(chatId, assistantId))!.payload,
+                row.payload,
+              );
+            } else {
+              await db.outboxDao.requeueParked(seq, nowEpochSeconds: 1000);
+              await drainer.drain();
+              expect(sendCalls, 2);
+              final retried = await (db.select(
+                db.outboxOps,
+              )..where((row) => row.seq.equals(seq))).getSingle();
+              expect(retried.status, OutboxStatus.failed);
+            }
+          },
+        );
+      }
+    }
+
+    test(
+      'auth epoch change during terminal settlement read defers without Drift or live UI writes',
+      () async {
+        const chatId = 'chat-terminal-owner-switch';
+        const assistantId = 'asst-terminal-owner-switch';
+        await seedChat(chatId);
+        await seedMessage(
+          chatId,
+          assistantId,
+          '',
+          payload: const <String, dynamic>{'isStreaming': true},
+        );
+        var authSessionEpoch = Object();
+        final failureReady = Completer<void>();
+        final transactionEntered = Completer<void>();
+        final releaseTransaction = Completer<void>();
+        late Future<void> transaction;
+        final fakeApi = _FakeCompletionApiService(
+          onSendMessageSession: () async {
+            transaction = db.transaction(() async {
+              transactionEntered.complete();
+              await releaseTransaction.future;
+            });
+            await transactionEntered.future;
+            failureReady.complete();
+            throw const SyncTerminalException(
+              statusCode: 400,
+              message: 'fixture terminal rejection',
+            );
+          },
+        );
+        final (:container, :runner) = makeRunner(
+          active: conv(chatId),
+          apiService: fakeApi,
+          authSessionEpoch: () => authSessionEpoch,
+        );
+        container.read(chatMessagesProvider.notifier).setMessages([
+          ChatMessage(
+            id: assistantId,
+            role: 'assistant',
+            content: '',
+            timestamp: DateTime.utc(2026, 10, 4),
+            isStreaming: true,
+          ),
+        ]);
+        final expectation = expectLater(
+          runner.run(chatId: chatId, payload: payload(assistantId)),
+          throwsA(isA<CompletionDatabaseUnavailableException>()),
+        );
+        await failureReady.future;
+        await Future<void>.delayed(Duration.zero);
+        authSessionEpoch = Object();
+        container.invalidate(openWebUiAuthSessionEpochProvider);
+        releaseTransaction.complete();
+        await transaction;
+        await expectation;
+
+        final row = await db.messagesDao.getMessage(chatId, assistantId);
+        final unchanged = jsonDecode(row!.payload) as Map<String, dynamic>;
+        expect(unchanged['isStreaming'], isTrue);
+        expect(unchanged['error'], isNull);
+        expect(
+          (unchanged['metadata'] as Map?)?['completionSubmitted'],
+          isNot(true),
+        );
+        expect(container.read(chatMessagesProvider).single.isStreaming, isTrue);
+        expect(container.read(chatMessagesProvider).single.error, isNull);
+      },
+    );
+  });
+
+  test(
+    'submitted terminal 500 surfaced from a failed byte stream retains partial content and visibly settles without replay',
+    () async {
+      const chatId = 'chat-failed-stream';
+      const assistantId = 'asst-failed-stream';
+      const partialContent = 'partial response before failure';
+      const failureMessage = 'response.failed: Agent execution failed.';
+      await seedChat(chatId);
+      await seedMessage(
+        chatId,
+        assistantId,
+        partialContent,
+        payload: const <String, dynamic>{
+          'id': assistantId,
+          'role': 'assistant',
+          'content': partialContent,
+          'isStreaming': true,
+        },
+      );
+      final correlation = LobeAgentCorrelation(
+        topicId: chatId,
+        agentId: 'fixture-agent',
+        userText: 'fixture prompt',
+        userLocalId: 'fixture-user',
+        assistantLocalId: assistantId,
+        snapshotServerIds: const {'prior-server-message'},
+        createdAt: DateTime.utc(2026, 10, 4),
+      );
+      var sendCalls = 0;
+      final fakeApi = _FakeCompletionApiService(
+        preDispatchCorrelation: correlation,
+        onSendMessageSession: () async {
+          sendCalls++;
+          await Stream<List<int>>.error(
+            const SyncTerminalException(
+              statusCode: 500,
+              message: failureMessage,
+            ),
+          ).drain<void>();
+          throw StateError('Expected the failed byte stream to throw');
+        },
+      );
+      final (:container, :runner) = makeRunner(
+        active: conv(chatId),
+        apiService: fakeApi,
+      );
+      container.read(chatMessagesProvider.notifier).setMessages([
+        ChatMessage(
+          id: assistantId,
+          role: 'assistant',
+          content: partialContent,
+          timestamp: DateTime.utc(2026, 10, 4),
+          isStreaming: true,
+        ),
+      ]);
+      final observedUi = <List<ChatMessage>>[];
+      final subscription = container.listen(
+        chatMessagesProvider,
+        (previous, next) => observedUi.add(next),
+      );
+      addTearDown(subscription.close);
+      final seq = await db.transaction(
+        () => db.outboxDao.enqueue(
+          kind: OutboxKind.requestCompletion,
+          chatId: chatId,
+          payload: payload(assistantId),
+        ),
+      );
+      final drainer = makeDrainer(runner);
+
+      await drainer.drain();
+
+      final op = await (db.select(
+        db.outboxOps,
+      )..where((row) => row.seq.equals(seq))).getSingle();
+      expect(op.status, OutboxStatus.failed);
+      expect(op.lastError, contains('(500)'));
+      expect(op.lastError, contains(failureMessage));
+      final row = await db.messagesDao.getMessage(chatId, assistantId);
+      final settled = jsonDecode(row!.payload) as Map<String, dynamic>;
+      final metadata = settled['metadata'] as Map<String, dynamic>;
+      expect(row.content, partialContent);
+      expect(settled['content'], partialContent);
+      expect(settled['isStreaming'], isFalse);
+      expect(settled['done'], isTrue);
+      expect((settled['error'] as Map)['content'], failureMessage);
+      expect(metadata['completionSubmitted'], isTrue);
+      expect(metadata['responseDone'], isTrue);
+      expect(metadata['lobeAgentCorrelation'], correlation.toJson());
+      expect(metadata['terminal'], isNot(true));
+      expect(observedUi.last.single.isStreaming, isFalse);
+      expect(observedUi.last.single.content, partialContent);
+      expect(observedUi.last.single.error?.content, failureMessage);
+      expect(container.read(isChatStreamingProvider), isFalse);
+
+      await db.outboxDao.requeueParked(seq, nowEpochSeconds: 1000);
+      await drainer.drain();
+      await runner.run(chatId: chatId, payload: payload(assistantId));
+
+      expect(sendCalls, 1);
+      expect(await db.select(db.outboxOps).get(), isEmpty);
+      expect(
+        (await db.messagesDao.getMessage(chatId, assistantId))!.payload,
+        row.payload,
+      );
+      expect(
+        container.read(chatMessagesProvider).single.error?.content,
+        failureMessage,
+      );
+    },
+  );
+
+  group('transport failures remain retryable', () {
+    const cases = [
+      (type: DioExceptionType.connectionTimeout, status: null),
+      (type: DioExceptionType.sendTimeout, status: 400),
+      (type: DioExceptionType.receiveTimeout, status: 401),
+      (type: DioExceptionType.connectionError, status: 403),
+      (type: DioExceptionType.badResponse, status: 404),
+      (type: DioExceptionType.badResponse, status: 409),
+      (type: DioExceptionType.badResponse, status: 500),
+      (type: DioExceptionType.badResponse, status: 503),
+    ];
+    for (final failure in cases) {
+      test(
+        '${failure.type.name} ${failure.status} retries unsubmitted work',
+        () async {
+          const chatId = 'chat-retryable';
+          const assistantId = 'asst-retryable';
+          await seedChat(chatId);
+          await seedMessage(
+            chatId,
+            assistantId,
+            '',
+            payload: const <String, dynamic>{'isStreaming': true},
+          );
+          var sendCalls = 0;
+          final options = RequestOptions(path: '/fixture/completion');
+          final failureError = DioException(
+            requestOptions: options,
+            type: failure.type,
+            response: failure.status == null
+                ? null
+                : Response(requestOptions: options, statusCode: failure.status),
+          );
+          final fakeApi = _FakeCompletionApiService(
+            onSendMessageSession: () async {
+              sendCalls++;
+              throw failureError;
+            },
+          );
+          final (:container, :runner) = makeRunner(
+            active: conv(chatId),
+            apiService: fakeApi,
+          );
+          container.read(chatMessagesProvider.notifier).setMessages([
+            ChatMessage(
+              id: assistantId,
+              role: 'assistant',
+              content: '',
+              timestamp: DateTime.utc(2026, 10, 4),
+              isStreaming: true,
+            ),
+          ]);
+          final seq = await db.transaction(
+            () => db.outboxDao.enqueue(
+              kind: OutboxKind.requestCompletion,
+              chatId: chatId,
+              payload: payload(assistantId),
+            ),
+          );
+          final drainer = makeDrainer(runner);
+          await drainer.drain();
+          final op = await (db.select(
+            db.outboxOps,
+          )..where((row) => row.seq.equals(seq))).getSingle();
+          expect(op.status, OutboxStatus.pending);
+          expect(op.attempts, 1);
+          expect(op.nextAttemptAt, greaterThan(1000));
+          expect(sendCalls, 1);
+
+          await db.outboxDao.retryPendingNow(seq, nowEpochSeconds: 1000);
+          await drainer.drain();
+          expect(sendCalls, 2);
+          final row = await db.messagesDao.getMessage(chatId, assistantId);
+          final unsettled = jsonDecode(row!.payload) as Map<String, dynamic>;
+          final metadata = unsettled['metadata'] as Map<String, dynamic>?;
+          expect(unsettled['isStreaming'], isTrue);
+          expect(unsettled['error'], isNull);
+          expect(metadata?['terminal'], isNot(true));
+          expect(metadata?['responseDone'], isNot(true));
+          expect(metadata?['completionSubmitted'], isNot(true));
+          expect(
+            container.read(chatMessagesProvider).single.isStreaming,
+            isTrue,
+          );
+          expect(container.read(chatMessagesProvider).single.error, isNull);
+        },
+      );
+    }
+  });
+
+  for (final status in <int?>[503, null]) {
+    test(
+      'submitted ${status == null ? 'Dio timeout' : 'Dio $status'} remains pending and keeps its dispatch barrier',
+      () async {
+        const chatId = 'chat-submitted-transient';
+        const assistantId = 'asst-submitted-transient';
+        await seedChat(chatId);
+        await seedMessage(
+          chatId,
+          assistantId,
+          '',
+          payload: const <String, dynamic>{'isStreaming': true},
+        );
+        final correlation = LobeAgentCorrelation(
+          topicId: chatId,
+          agentId: 'fixture-agent',
+          userText: 'fixture prompt',
+          userLocalId: 'fixture-user',
+          assistantLocalId: assistantId,
+          snapshotServerIds: const {},
+          createdAt: DateTime.utc(2026, 10, 4),
+        );
+        final options = RequestOptions(path: '/fixture/completion');
+        final error = DioException(
+          requestOptions: options,
+          type: status == null
+              ? DioExceptionType.connectionTimeout
+              : DioExceptionType.badResponse,
+          response: status == null
+              ? null
+              : Response(requestOptions: options, statusCode: status),
+        );
+        var sendCalls = 0;
+        final fakeApi = _FakeCompletionApiService(
+          preDispatchCorrelation: correlation,
+          onSendMessageSession: () async {
+            sendCalls++;
+            throw error;
+          },
+        );
+        final (:container, :runner) = makeRunner(
+          active: conv(chatId),
+          apiService: fakeApi,
+        );
+        container.read(chatMessagesProvider.notifier).setMessages([
+          ChatMessage(
+            id: assistantId,
+            role: 'assistant',
+            content: '',
+            timestamp: DateTime.utc(2026, 10, 4),
+            isStreaming: true,
+          ),
+        ]);
+        final seq = await db.transaction(
+          () => db.outboxDao.enqueue(
+            kind: OutboxKind.requestCompletion,
+            chatId: chatId,
+            payload: payload(assistantId),
+          ),
+        );
+        final drainer = makeDrainer(runner);
+
+        await drainer.drain();
+        await drainer.drain();
+
+        final op = await (db.select(
+          db.outboxOps,
+        )..where((row) => row.seq.equals(seq))).getSingle();
+        expect(op.status, OutboxStatus.pending);
+        expect(op.attempts, 1);
+        expect(op.nextAttemptAt, greaterThan(1000));
+        expect(sendCalls, 1);
+        final row = await db.messagesDao.getMessage(chatId, assistantId);
+        final unsettled = jsonDecode(row!.payload) as Map<String, dynamic>;
+        final metadata = unsettled['metadata'] as Map<String, dynamic>;
+        expect(unsettled['isStreaming'], isTrue);
+        expect(unsettled['error'], isNull);
+        expect(metadata['completionSubmitted'], isTrue);
+        expect(metadata['lobeAgentCorrelation'], correlation.toJson());
+        expect(metadata['terminal'], isNot(true));
+        expect(metadata['responseDone'], isNot(true));
+        expect(container.read(chatMessagesProvider).single.isStreaming, isTrue);
+        expect(container.read(chatMessagesProvider).single.error, isNull);
+      },
+    );
+  }
 }
 
 class _FakeCompletionApiService extends Fake implements ApiService {
-  _FakeCompletionApiService({this.onSendMessageSession});
+  _FakeCompletionApiService({
+    this.onSendMessageSession,
+    this.preDispatchCorrelation,
+  });
 
   @override
   final ServerConfig serverConfig = const ServerConfig(
@@ -870,6 +1473,7 @@ class _FakeCompletionApiService extends Fake implements ApiService {
   );
 
   final Future<ChatCompletionSession> Function()? onSendMessageSession;
+  final LobeAgentCorrelation? preDispatchCorrelation;
 
   @override
   Future<Map<String, dynamic>> getUserSettings({
@@ -903,11 +1507,29 @@ class _FakeCompletionApiService extends Fake implements ApiService {
     String? lobeAgentId,
     Future<void> Function(LobeAgentCorrelation correlation)? onPreDispatch,
   }) async {
+    final correlation = preDispatchCorrelation;
+    if (correlation != null) {
+      await onPreDispatch!(correlation);
+    }
     if (onSendMessageSession != null) {
       return await onSendMessageSession!();
     }
     throw UnimplementedError();
   }
+}
+
+class _TestModels extends Models {
+  @override
+  Future<List<Model>> build() async => const [
+    Model(id: 'model-1', name: 'Model 1', supportsStreaming: true),
+  ];
+}
+
+class _TestSyncClock implements SyncClock {
+  const _TestSyncClock();
+
+  @override
+  int nowEpochSeconds() => 1000;
 }
 
 class _SeededActive extends ActiveConversationNotifier {

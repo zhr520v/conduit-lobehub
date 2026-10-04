@@ -179,8 +179,8 @@ class ChatRequestCompletionRunner implements RequestCompletionRunner {
       return;
     }
     final completionWasSubmitted = _placeholderMarkedSubmitted(placeholder);
-    // Once the POST crossed the server boundary this op is pull-only recovery;
-    // another live stream must not prevent collecting the accepted response.
+    // The submitted barrier means dispatch may have started, not that the server
+    // accepted it. Recovery is pull-only even when another live stream is busy.
     if (!completionWasSubmitted) {
       deferIfTargetIsBusy();
       final placeholderPayload = _decodeMessagePayload(placeholder.payload);
@@ -194,13 +194,12 @@ class ChatRequestCompletionRunner implements RequestCompletionRunner {
         );
         requireCurrentConversationOwner();
         if (activeOpenWebUiChatIdForMutation(_ref, owner) != null) {
-          _ref.read(chatMessagesProvider.notifier).updateMessageById(
-            assistantMessageId,
-            (message) => message.copyWith(
-              isStreaming: true,
-              error: null,
-            ),
-          );
+          _ref
+              .read(chatMessagesProvider.notifier)
+              .updateMessageById(
+                assistantMessageId,
+                (message) => message.copyWith(isStreaming: true, error: null),
+              );
         }
       }
     }
@@ -224,9 +223,9 @@ class ChatRequestCompletionRunner implements RequestCompletionRunner {
     }
 
     if (completionWasSubmitted) {
-      // The POST already crossed the server boundary before a prior run lost
-      // foreground ownership or its byte stream failed. Recover by pull only;
-      // replaying the request here would duplicate the assistant generation.
+      // Dispatch may have started before a prior run lost foreground ownership
+      // or its byte stream failed. Recover by pull only; replaying an ambiguous
+      // submission could duplicate the assistant generation.
       owner.chatId = await resolveOpenWebUiCompletionChatId(
         _ref,
         owner: owner,
@@ -247,8 +246,7 @@ class ChatRequestCompletionRunner implements RequestCompletionRunner {
     // Both database reads above are async. Re-read the global owner and stream
     // state now; the user may have navigated while either query was queued.
     deferIfTargetIsBusy();
-    final targetIsActive =
-        activeOpenWebUiChatIdForMutation(_ref, owner) != null;
+    final targetIsActive = activeOpenWebUiChatIdForMutation(_ref, owner) != null;
 
     try {
       if (targetIsActive &&
@@ -309,7 +307,7 @@ class ChatRequestCompletionRunner implements RequestCompletionRunner {
       );
     } catch (error) {
       if (_isTerminalCompletionError(error)) {
-        await _settleTerminalPreSubmissionFailure(
+        await _settleTerminalCompletionFailure(
           chatId: chatId,
           assistantMessageId: assistantMessageId,
           error: error,
@@ -322,41 +320,55 @@ class ChatRequestCompletionRunner implements RequestCompletionRunner {
     }
   }
 
-  Future<void> _settleTerminalPreSubmissionFailure({
+  Future<void> _settleTerminalCompletionFailure({
     required String chatId,
     required String assistantMessageId,
     required Object error,
     required OpenWebUiCompletionOwner owner,
     required OpenWebUiConversationReadSnapshot session,
   }) async {
-    if (!openWebUiConversationReadIsCurrent(_ref, session) ||
-        !openWebUiCompletionContextIsCurrent(_ref, owner)) {
-      throw const CompletionDatabaseUnavailableException();
+    void requireCurrentOwner() {
+      if (!openWebUiConversationReadIsCurrent(_ref, session) ||
+          !openWebUiCompletionContextIsCurrent(_ref, owner)) {
+        throw const CompletionDatabaseUnavailableException();
+      }
     }
+
+    requireCurrentOwner();
     final db = owner.database;
     if (db == null) return;
-
-    final current = await db.messagesDao.getMessage(chatId, assistantMessageId);
-    if (current != null && _placeholderMarkedSubmitted(current)) {
-      return;
-    }
-
     final errorMessage = _cleanErrorMessage(error);
 
-    await db.messagesDao.markAssistantCompletionPreSubmissionFailed(
-      chatId: chatId,
-      messageId: assistantMessageId,
-      error: errorMessage,
-    );
+    await db.transaction(() async {
+      final current = await db.messagesDao.getMessage(chatId, assistantMessageId);
+      requireCurrentOwner();
+      if (current != null && _placeholderMarkedSubmitted(current)) {
+        await db.messagesDao.markAssistantCompletionRecoveryFailed(
+          chatId: chatId,
+          messageId: assistantMessageId,
+          error: errorMessage,
+        );
+      } else {
+        await db.messagesDao.markAssistantCompletionPreSubmissionFailed(
+          chatId: chatId,
+          messageId: assistantMessageId,
+          error: errorMessage,
+        );
+      }
+      requireCurrentOwner();
+    });
+    requireCurrentOwner();
 
     if (activeOpenWebUiChatIdForMutation(_ref, owner) != null) {
-      _ref.read(chatMessagesProvider.notifier).updateMessageById(
-        assistantMessageId,
-        (message) => message.copyWith(
-          isStreaming: false,
-          error: ChatMessageError(content: errorMessage),
-        ),
-      );
+      _ref
+          .read(chatMessagesProvider.notifier)
+          .updateMessageById(
+            assistantMessageId,
+            (message) => message.copyWith(
+              isStreaming: false,
+              error: ChatMessageError(content: errorMessage),
+            ),
+          );
     }
   }
 }
@@ -375,10 +387,18 @@ bool _placeholderMarkedComplete(MessageRow placeholder) {
 
 bool _isTerminalCompletionError(Object error) {
   if (error is SyncTerminalException) {
-    final status = error.statusCode;
-    return status == null || status == 400 || status == 401 || status == 403;
+    return true;
   }
   if (error is DioException) {
+    switch (error.type) {
+      case DioExceptionType.connectionTimeout:
+      case DioExceptionType.sendTimeout:
+      case DioExceptionType.receiveTimeout:
+      case DioExceptionType.connectionError:
+        return false;
+      default:
+        break;
+    }
     final status = error.response?.statusCode;
     return status == 400 || status == 401 || status == 403;
   }
@@ -387,7 +407,10 @@ bool _isTerminalCompletionError(Object error) {
 
 SyncTerminalException _asTerminalCompletionException(Object error) {
   if (error is SyncTerminalException) {
-    return error;
+    return SyncTerminalException(
+      statusCode: error.statusCode,
+      message: _cleanErrorMessage(error),
+    );
   }
   if (error is DioException) {
     final status = error.response?.statusCode ?? 400;
