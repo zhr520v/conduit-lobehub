@@ -3,6 +3,7 @@ import 'package:drift/drift.dart';
 import 'package:conduit_core/database/app_database.dart';
 import 'package:conduit_core/database/mappers/chat_blob_mapper.dart';
 import 'package:conduit_core/database/mappers/conversation_assembler.dart';
+import 'package:conduit_core/models/server_config.dart';
 
 import 'package:conduit_core/utils/debug_logger.dart';
 
@@ -56,6 +57,13 @@ class PushSync {
   final SyncClock _clock;
   final IdRemapper _remapper;
 
+  ApiSyncApiClient? get _lobeClient {
+    final client = _client;
+    return client is ApiSyncApiClient && client.api.serverConfig.isLobeHub
+        ? client
+        : null;
+  }
+
   // ---- createChat (§7.3) ----
 
   /// Pushes the new local chat [localId], remaps it to the server id, and
@@ -82,11 +90,9 @@ class PushSync {
         final chat = await _db.chatsDao.getChat(localId);
         if (chat != null) {
           final messages = await _db.messagesDao.getForChat(localId);
-          final capturedMessageIds = _messageIdsIfSnapshotMatches(
-            chat,
-            messages,
-            contentHash,
-          );
+          final capturedMessageIds = _lobeClient != null
+              ? await _persistRemappedLobeMessages(localId, chat, messages)
+              : _messageIdsIfSnapshotMatches(chat, messages, contentHash);
           await _clearDirty(
             chatId: localId,
             messageIds: capturedMessageIds,
@@ -116,7 +122,14 @@ class PushSync {
           'createChat deferred until folder remap completes: $localId',
         );
       }
-      final resp = await _client.createChat(blob, folderId: chat.folderId);
+      final lobeClient = _lobeClient;
+      final resp = lobeClient == null
+          ? await _client.createChat(blob, folderId: chat.folderId)
+          : await lobeClient.api.createChatRaw(
+              blob,
+              folderId: chat.folderId,
+              deferMessageUpload: true,
+            );
       final serverId = resp['id'];
       if (serverId is! String || serverId.isEmpty) {
         throw StateError('createChat response without a string id');
@@ -162,7 +175,13 @@ class PushSync {
         // and the chat row.
         await _clearDirty(
           chatId: pushed.serverId,
-          messageIds: pushed.capturedMessageIds,
+          messageIds: lobeClient == null
+              ? pushed.capturedMessageIds
+              : (await lobeClient.api.persistLobeHubChatMessages(
+                  topicId: pushed.serverId,
+                  chatBlob: blob,
+                  agentId: (resp['meta'] as Map?)?['agentId']?.toString(),
+                )).toList(),
           serverUpdatedAt: pushed.serverUpdatedAt,
         );
       });
@@ -285,7 +304,9 @@ class PushSync {
       // lock span, but defensively) stays dirty.
       await _clearDirty(
         chatId: chatId,
-        messageIds: capturedMessageIds,
+        messageIds: _lobeClient == null
+            ? capturedMessageIds
+            : (resp['conduitPersistedMessageIds'] as List).cast<String>(),
         serverUpdatedAt: serverUpdatedAt,
       );
     });
@@ -482,6 +503,17 @@ class PushSync {
   }
 
   // ---- helpers ----
+
+  Future<List<String>> _persistRemappedLobeMessages(
+    String serverId,
+    ChatRow chat,
+    List<MessageRow> messages,
+  ) async {
+    final client = _lobeClient!;
+    final blob = ChatBlobMapper.rowsToBlob(chatRowsFromDb(chat, messages));
+    final response = await client.api.updateChatRaw(serverId, blob);
+    return (response!['conduitPersistedMessageIds'] as List).cast<String>();
+  }
 
   /// Caller holds the chat lock. Stores [serverUpdatedAt] + clears dirty for
   /// the chat row and exactly [messageIds] in ONE transaction (REQ §7.2/§10).
