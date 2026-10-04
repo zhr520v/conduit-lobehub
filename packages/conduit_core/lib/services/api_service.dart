@@ -415,6 +415,78 @@ int? _parseEpochSeconds(Object? value) {
   return null;
 }
 
+Future<Map<String, dynamic>?> _fetchLobeTopicAgent(Dio dio, String agentId) async {
+  try {
+    final response = await dio.get('/api/v1/agents/${Uri.encodeComponent(agentId)}');
+    final envelope = response.data;
+    final agent = envelope is Map && envelope['data'] is Map
+        ? envelope['data'] as Map
+        : envelope;
+    if (agent is! Map || agent['id']?.toString() != agentId) {
+      throw FormatException('LobeHub agent detail does not match $agentId');
+    }
+    return Map<String, dynamic>.from(agent);
+  } on DioException catch (error) {
+    if (error.response?.statusCode != 404) rethrow;
+    return null;
+  }
+}
+
+Future<Map<String, dynamic>> _lobeTopicIdentity(
+  Dio dio,
+  Map<String, dynamic> topic, {
+  Map<String, Map<String, dynamic>?>? agentCache,
+}) async {
+  final metadata = topic['metadata'] is Map
+      ? Map<String, dynamic>.from(topic['metadata'] as Map)
+      : <String, dynamic>{};
+  final agentId = topic['agentId']?.toString();
+  String? agentTitle;
+  String? model;
+  String? provider;
+  if (agentId != null && agentId.isNotEmpty) {
+    agentTitle = metadata['agentTitle']?.toString() ?? agentId;
+    model = metadata['agentModel']?.toString();
+    provider = metadata['agentProvider']?.toString();
+    final Map<String, dynamic>? agent;
+    if (agentCache != null && agentCache.containsKey(agentId)) {
+      agent = agentCache[agentId];
+    } else {
+      agent = await _fetchLobeTopicAgent(dio, agentId);
+      agentCache?[agentId] = agent;
+    }
+    if (agent != null) {
+      agentTitle = agent['title']?.toString() ?? agentTitle;
+      model = agent['model']?.toString();
+      provider = agent['provider']?.toString();
+    }
+    final resolvedAgentId = agent?['id']?.toString() ?? agentId;
+    final groupId = topic['groupId']?.toString();
+    final canUseTopicPin = groupId == null ||
+        groupId.isEmpty ||
+        topic['agentId'] == resolvedAgentId;
+    final pinnedModel = canUseTopicPin ? topic['model']?.toString() : null;
+    if (pinnedModel != null && pinnedModel.isNotEmpty) {
+      model = pinnedModel;
+      final pinnedProvider = topic['provider']?.toString();
+      if (pinnedProvider != null && pinnedProvider.isNotEmpty) {
+        provider = pinnedProvider;
+      }
+    }
+  } else {
+    model = metadata['model']?.toString() ?? topic['model']?.toString();
+    provider = metadata['provider']?.toString() ?? topic['provider']?.toString();
+  }
+  return {
+    'backend': 'lobehub',
+    if (agentId != null && agentId.isNotEmpty) 'agentId': agentId,
+    'agentTitle': ?agentTitle,
+    if (agentId != null && agentId.isNotEmpty) 'agentModel': ?model,
+    'provider': ?provider,
+    'model': ?model,
+  };
+}
+
 Future<List<Map<String, dynamic>>> fetchLobeHubTopicListPageRaw(
   Dio dio, {
   required int page,
@@ -432,6 +504,7 @@ Future<List<Map<String, dynamic>>> fetchLobeHubTopicListPageRaw(
   }
 
   final result = <Map<String, dynamic>>[];
+  final agentCache = <String, Map<String, dynamic>?>{};
   for (final topic in topicsList) {
     if (topic is! Map) continue;
     final id = topic['id']?.toString() ?? '';
@@ -449,6 +522,11 @@ Future<List<Map<String, dynamic>>> fetchLobeHubTopicListPageRaw(
         updatedAt;
     final pinned = topic['favorite'] == true || topic['starred'] == true;
     final folderId = topic['groupId']?.toString();
+    final identity = await _lobeTopicIdentity(
+      dio,
+      Map<String, dynamic>.from(topic),
+      agentCache: agentCache,
+    );
 
     result.add({
       'id': id,
@@ -458,6 +536,9 @@ Future<List<Map<String, dynamic>>> fetchLobeHubTopicListPageRaw(
       'last_read_at': updatedAt,
       'pinned': pinned,
       'folder_id': ?folderId,
+      'model': ?identity['model'],
+      'metadata': identity,
+      'meta': identity,
     });
   }
   return result;
@@ -498,6 +579,53 @@ Future<List<Map<String, dynamic>>> fetchAllLobeHubMessages(
   return allMessages;
 }
 
+/// Whether a raw or mapped LobeHub assistant has a successful completed result.
+///
+/// Text, reasoning or tool output needs explicit completion or ordinary server
+/// model/provider provenance. Operation-owned rows need explicit completion.
+/// Any error or unfinished flag in the row, metadata or meta overrides completion.
+bool lobeHubAssistantResultComplete(Map<String, dynamic> message) {
+  final states = <Map>[
+    message,
+    if (message['metadata'] is Map) message['metadata'] as Map,
+    if (message['meta'] is Map) message['meta'] as Map,
+  ];
+  for (final state in states) {
+    if (state['error'] != null ||
+        state['terminal'] == true ||
+        state['interruptedMidStream'] == true ||
+        (state['status'] != null && state['status'] != 'completed') ||
+        (state['finishType'] != null && state['finishType'] != 'stop') ||
+        state['done'] == false ||
+        state['isStreaming'] == true ||
+        state['responseDone'] == false ||
+        state['incomplete_details'] != null) {
+      return false;
+    }
+  }
+  bool hasText(dynamic value) =>
+      value is String && value.trim().isNotEmpty && value.trim() != '...';
+  final reasoning = message['reasoning'];
+  if (!hasText(message['content']) &&
+      !hasText(reasoning is Map ? reasoning['content'] : reasoning) &&
+      !hasText(message['reasoning_content']) &&
+      !(message['tools'] is List && (message['tools'] as List).isNotEmpty)) {
+    return false;
+  }
+  if (states.any((state) =>
+      state['status'] == 'completed' ||
+      state['finishType'] == 'stop' ||
+      state['done'] == true ||
+      state['responseDone'] == true)) {
+    return true;
+  }
+  if (states.any((state) => state['operationId'] != null)) return false;
+  final model = message['model'];
+  final provider = message['provider'];
+  return model is String && model.trim().isNotEmpty &&
+      provider is String && provider.trim().isNotEmpty;
+}
+
 Future<Map<String, dynamic>?> fetchLobeHubChatRaw(Dio dio, String id) async {
   try {
     final messagesList = await fetchAllLobeHubMessages(dio, topicId: id);
@@ -507,30 +635,19 @@ Future<Map<String, dynamic>?> fetchLobeHubChatRaw(Dio dio, String id) async {
     int updatedAt = createdAt;
     bool pinned = false;
     String? folderId;
-    String? model;
-    String? agentId;
-
     Map<String, dynamic>? topicObj;
-    if (messagesList.isNotEmpty) {
-      final firstMsg = messagesList.first;
-      if (firstMsg['topic'] is Map) {
-        topicObj = Map<String, dynamic>.from(firstMsg['topic'] as Map);
-      }
-    }
 
-    if (topicObj == null) {
-      try {
-        final topicResp = await dio.get('/api/v1/topics/$id');
-        final tData = topicResp.data;
-        if (tData is Map && tData['data'] is Map) {
-          topicObj = Map<String, dynamic>.from(tData['data'] as Map);
-        } else if (tData is Map) {
-          topicObj = Map<String, dynamic>.from(tData);
-        }
-      } on DioException catch (e) {
-        if (e.response?.statusCode != 404) {
-          rethrow;
-        }
+    try {
+      final topicResp = await dio.get('/api/v1/topics/$id');
+      final tData = topicResp.data;
+      if (tData is Map && tData['data'] is Map) {
+        topicObj = Map<String, dynamic>.from(tData['data'] as Map);
+      } else if (tData is Map) {
+        topicObj = Map<String, dynamic>.from(tData);
+      }
+    } on DioException catch (e) {
+      if (e.response?.statusCode != 404) {
+        rethrow;
       }
     }
 
@@ -543,11 +660,13 @@ Future<Map<String, dynamic>?> fetchLobeHubChatRaw(Dio dio, String id) async {
       updatedAt = _parseEpochSeconds(topicObj['updatedAt'] ?? topicObj['updated_at']) ?? updatedAt;
       pinned = topicObj['favorite'] == true || topicObj['starred'] == true;
       folderId = topicObj['groupId']?.toString();
-      model = topicObj['model']?.toString();
-      agentId = topicObj['agentId']?.toString();
     }
 
+    final identity = await _lobeTopicIdentity(dio, topicObj ?? {});
+    final model = identity['model'] as String?;
+
     final messagesMap = <String, Map<String, dynamic>>{};
+    final aliases = <String, String>{};
     String? currentId;
 
     for (final m in messagesList) {
@@ -569,7 +688,19 @@ Future<Map<String, dynamic>?> fetchLobeHubChatRaw(Dio dio, String id) async {
       final effectiveId = (conduitClientId != null && conduitClientId.isNotEmpty)
           ? conduitClientId
           : mId;
+      if (aliases.containsKey(mId) || messagesMap.containsKey(effectiveId)) {
+        throw FormatException('LobeHub message identity collision: $mId -> $effectiveId');
+      }
+      aliases[mId] = effectiveId;
       meta['serverMessageId'] = mId;
+      if (m['model'] != null) meta['model'] = m['model'];
+      if (m['provider'] != null) meta['provider'] = m['provider'];
+      if (m.containsKey('status')) meta['status'] = m['status'];
+      if (m.containsKey('incomplete_details')) {
+        meta['incomplete_details'] = m['incomplete_details'];
+      }
+      final complete = role == 'assistant' && lobeHubAssistantResultComplete(m);
+      if (role == 'assistant') meta['responseDone'] = complete;
       currentId = effectiveId;
 
       messagesMap[effectiveId] = {
@@ -583,10 +714,30 @@ Future<Map<String, dynamic>?> fetchLobeHubChatRaw(Dio dio, String id) async {
           'parentId': (m['parentId'] ?? m['parent_id']).toString(),
         'childrenIds': ?m['childrenIds'],
         'model': ?mModel,
+        'provider': ?m['provider'],
+        'error': ?m['error'],
+        'status': ?m['status'],
+        if (role == 'assistant') 'done': complete,
+        if (role == 'assistant') 'isStreaming': !complete,
         if (reasoning != null && reasoning.isNotEmpty) 'reasoning': reasoning,
         'meta': meta,
+        'metadata': meta,
         'chatId': id,
       };
+    }
+
+    for (final message in messagesMap.values) {
+      final parentId = message['parentId'] as String?;
+      if (parentId != null) {
+        message['parentId'] = aliases[parentId] ?? parentId;
+      }
+      final children = message['childrenIds'];
+      if (children is List) {
+        message['childrenIds'] = [
+          for (final child in children)
+            aliases[child.toString()] ?? child.toString(),
+        ];
+      }
     }
 
     return {
@@ -597,12 +748,12 @@ Future<Map<String, dynamic>?> fetchLobeHubChatRaw(Dio dio, String id) async {
       'pinned': pinned,
       'archived': false,
       'folder_id': ?folderId,
-      'meta': {
-        'agentId': ?agentId,
-        'model': ?model,
-      },
+      'model': ?model,
+      'metadata': identity,
+      'meta': identity,
       'chat': {
         'title': title,
+        'metadata': identity,
         if (model != null) 'models': [model],
         'history': {
           'currentId': ?currentId,

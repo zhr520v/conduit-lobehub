@@ -19,7 +19,9 @@ import 'structured_output_renderer.dart';
 /// can be executed inside a background worker.
 
 const _uuid = Uuid();
-const _knownLobeMetadataKeys = <String>{'backend', 'agentId', 'provider'};
+const _knownLobeMetadataKeys = <String>{
+  'backend', 'agentId', 'agentTitle', 'agentModel', 'provider', 'model',
+};
 
 Map<String, dynamic> parseConversationSummary(Map<String, dynamic> chatData) {
   final id = (chatData['id'] ?? '').toString();

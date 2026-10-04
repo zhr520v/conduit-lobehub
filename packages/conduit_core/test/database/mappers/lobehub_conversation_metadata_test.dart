@@ -139,7 +139,10 @@ void main() {
         'title': 'Blob Only Marker',
         'metadata': {
           'backend': 'lobehub',
-          'agentId': 'agent_blob_solo',
+            'agentId': 'agent_blob_solo',
+            'agentTitle': 'Blob Solo Agent',
+            'agentModel': 'gemini-exact',
+            'model': 'gemini-exact',
           'provider': 'gemini',
         },
         'history': {
@@ -176,6 +179,9 @@ void main() {
 
       check(conversation.metadata['backend']).equals('lobehub');
       check(conversation.metadata['agentId']).equals('agent_blob_solo');
+      check(conversation.metadata['agentTitle']).equals('Blob Solo Agent');
+      check(conversation.metadata['agentModel']).equals('gemini-exact');
+      check(conversation.metadata['model']).equals('gemini-exact');
       check(conversation.metadata['provider']).equals('gemini');
     });
 
