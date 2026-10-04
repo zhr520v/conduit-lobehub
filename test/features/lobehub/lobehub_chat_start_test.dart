@@ -1,581 +1,288 @@
-import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_test/flutter_test.dart';
+import 'dart:async';
+import 'dart:convert';
 
-import 'package:conduit_core/features/lobehub/models/lobe_agent.dart';
-import 'package:conduit_core/features/lobehub/models/lobe_topic.dart';
-import 'package:conduit_core/features/lobehub/providers/lobehub_agents_provider.dart';
-import 'package:conduit_core/features/lobehub/providers/lobehub_topics_provider.dart';
-import 'package:conduit_core/models/conversation.dart';
-import 'package:conduit_core/models/model.dart';
-import 'package:conduit_core/models/server_config.dart';
 import 'package:conduit_core/providers/app_providers.dart';
-
+import 'package:conduit_core/persistence/preferences_store.dart';
+import 'package:conduit_core/sync/sync_engine.dart';
 import 'package:conduit/features/lobehub/providers/lobehub_chat_start_provider.dart';
 import 'package:conduit/features/navigation/providers/conversation_selection_provider.dart';
 import 'package:conduit/features/navigation/views/main_navigation_shell.dart';
 import 'package:conduit/l10n/app_localizations.dart';
 import 'package:conduit/l10n/conduit_localizations.dart';
+import 'package:conduit/platform/flutter_key_value_store.dart';
 import 'package:conduit/shared/widgets/platform_ui/platform_ui.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-class _FakeLobeTopicsNotifier extends LobeTopicsNotifier {
-  _FakeLobeTopicsNotifier({this.shouldThrow = false});
+import 'role_test_harness.dart';
 
-  final bool shouldThrow;
-  LobeTopic? lastCreatedTopic;
-
-  @override
-  LobeTopicsState build() => const LobeTopicsState();
-
-  @override
-  Future<LobeTopic> createTopic({
-    required String title,
-    String? agentId,
-    String? sessionId,
-    Map<String, dynamic>? metadata,
-  }) async {
-    if (shouldThrow) {
-      throw Exception('Server rejected topic creation');
-    }
-    final topic = LobeTopic(
-      id: 'server_topic_123',
-      title: title,
-      agentId: agentId,
-      sessionId: sessionId,
-      metadata: metadata ?? const <String, dynamic>{},
-      createdAt: DateTime.now(),
-      updatedAt: DateTime.now(),
-    );
-    lastCreatedTopic = topic;
-    state = state.copyWith(
-      topics: [topic, ...state.topics],
-      activeTopicId: topic.id,
-    );
-    return topic;
-  }
+Future<BuildContext> _host(WidgetTester tester, RoleHarness harness) async {
+  late BuildContext host;
+  await tester.pumpWidget(UncontrolledProviderScope(
+    container: harness.container,
+    child: MaterialApp(
+      theme: ThemeData.light(),
+      localizationsDelegates: conduitLocalizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: Scaffold(body: Builder(builder: (context) {
+        host = context;
+        return const Text('Online role test host');
+      })),
+    ),
+  ));
+  await tester.runAsync(harness.initialize);
+  return host;
 }
 
-class _FakeConversationSelection extends ConversationSelection {
-  _FakeConversationSelection({this.shouldFail = false});
+Future<bool> _start(
+  WidgetTester tester,
+  RoleHarness harness,
+  BuildContext context,
+) async => (await tester.runAsync(() => harness.container
+        .read(lobehubChatStartProvider.notifier)
+        .startAgentChat(context: context, agent: harness.agent)))!;
 
-  final bool shouldFail;
-  Conversation? lastSelectedConversation;
-
-  @override
-  ConversationSelectionState build() => const ConversationSelectionState();
-
-  @override
-  Future<ConversationSelectionResult> select(Conversation summary) async {
-    lastSelectedConversation = summary;
-    if (shouldFail) {
-      return ConversationSelectionResult.failed(
-        Exception('Network timeout during selection'),
-        StackTrace.current,
-      );
-    }
-    return const ConversationSelectionResult.committed();
-  }
-}
-
-class _TestModelsNotifier extends Models {
-  _TestModelsNotifier(this._models);
-  final List<Model> _models;
-
-  @override
-  Future<List<Model>> build() async => _models;
-}
-
-class _TestSelectedModelNotifier extends SelectedModel {
-  _TestSelectedModelNotifier();
-
-  @override
-  Model? build() => null;
-
-  @override
-  void set(Model? model, {bool allowHidden = false}) {
-    state = model;
-  }
-}
-
-class _TestReviewerModeNotifier extends ReviewerMode {
-  _TestReviewerModeNotifier([this._initial = false]);
-  final bool _initial;
-
-  @override
-  bool build() => _initial;
-}
-
-class _TestNavigationNotifier extends MainNavigationIndexNotifier {
-  _TestNavigationNotifier([this._initial = 0]);
-  final int _initial;
-
-  @override
-  int build() => _initial;
-}
-
-class _TestAgentsNotifier extends LobeAgentsNotifier {
-  _TestAgentsNotifier(this._initialState);
-  final LobeAgentsState _initialState;
-
-  @override
-  LobeAgentsState build() => _initialState;
+void _expectFailure(RoleHarness harness) {
+  expect(harness.container.read(lobehubChatStartProvider).isStarting, isFalse);
+  expect(harness.container.read(lobehubChatStartProvider).error, isNotEmpty);
+  expect(harness.container.read(mainNavigationIndexProvider), 1);
+  expect(harness.container.read(selectedModelProvider), foreignModel);
+  expect(harness.container.read(activeConversationProvider), isNull);
 }
 
 void main() {
-  setUp(() {
+  setUp(() async {
     PlatformUiCapabilities.debugPlatformOverride = TargetPlatform.android;
+    SharedPreferences.setMockInitialValues({});
+    PreferencesStore.debugReset();
+    PreferencesStore.debugOverride(await FlutterKeyValueStore.load());
   });
-
   tearDown(() {
+    PreferencesStore.debugReset();
     PlatformUiCapabilities.resetDebugOverrides();
   });
 
-  group('LobeHub Chat Start - Agent to Topic Binding & Model Separation', () {
-    testWidgets('creates server topic bound to agent and selects real model by BOTH modelId and provider', (
-      tester,
-    ) async {
-      final topicsNotifier = _FakeLobeTopicsNotifier();
-      final selectionNotifier = _FakeConversationSelection();
-
-      final agent = const LobeAgent(
-        id: 'agent_coder_42',
-        title: 'DeepSeek Coding Specialist',
-        model: 'deepseek-coder',
-        provider: 'deepseek',
-        systemRole: 'You are an expert Flutter systems architect.',
-      );
-
-      // Model roster with separate real models (no agents injected)
-      final rosterModels = [
-        const Model(
-          id: 'gpt-4o',
-          name: 'GPT-4o',
-          metadata: {'provider': 'openai', 'providerId': 'openai'},
-        ),
-        const Model(
-          id: 'deepseek-coder',
-          name: 'DeepSeek Coder V2',
-          metadata: {'provider': 'deepseek', 'providerId': 'deepseek'},
-        ),
-        const Model(
-          id: 'deepseek-coder',
-          name: 'DeepSeek Coder (OpenRouter)',
-          metadata: {'provider': 'openrouter', 'providerId': 'openrouter'},
-        ),
-      ];
-
-      final container = ProviderContainer(
-        overrides: [
-          activeServerProvider.overrideWith(
-            (ref) => Future.value(
-              const ServerConfig(
-                id: 'lobehub_self_hosted',
-                name: 'LobeHub Server',
-                url: 'https://ai.example.com',
-              ),
-            ),
-          ),
-          apiServiceProvider.overrideWith((ref) => null),
-          reviewerModeProvider.overrideWith(() => _TestReviewerModeNotifier(false)),
-          selectedModelProvider.overrideWith(() => _TestSelectedModelNotifier()),
-          lobeHubApiClientProvider.overrideWith((ref) => null),
-          lobeTopicsProvider.overrideWith(() => topicsNotifier),
-          conversationSelectionProvider.overrideWith(() => selectionNotifier),
-          modelsProvider.overrideWith(() => _TestModelsNotifier(rosterModels)),
-        ],
-      );
-      addTearDown(container.dispose);
-
-      late BuildContext buildContext;
-
-      await tester.pumpWidget(
-        UncontrolledProviderScope(
-          container: container,
-          child: MaterialApp(
-            theme: ThemeData.light(),
-            localizationsDelegates: conduitLocalizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: Scaffold(
-              body: Builder(
-                builder: (context) {
-                  buildContext = context;
-                  return const Text('Test Host');
-                },
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      // Trigger startAgentChat
-      final success = await container
-          .read(lobehubChatStartProvider.notifier)
-          .startAgentChat(
-            context: buildContext,
-            agent: agent,
-          );
-
-      expect(success, isTrue);
-
-      // Verify 1: Topic was created on server bound to chosenAgent
-      expect(topicsNotifier.lastCreatedTopic, isNotNull);
-      expect(topicsNotifier.lastCreatedTopic!.agentId, equals('agent_coder_42'));
-      expect(topicsNotifier.lastCreatedTopic!.title, equals('DeepSeek Coding Specialist'));
-
-      // Verify 2: Real model was selected separately by BOTH modelId AND provider
-      final selectedModel = container.read(selectedModelProvider);
-      expect(selectedModel, isNotNull);
-      expect(selectedModel!.id, equals('deepseek-coder'));
-      expect(selectedModel.metadata?['provider'], equals('deepseek'));
-
-      // Verify 3: Agent was NOT injected as model ID (no agt_ as model)
-      expect(selectedModel.id.startsWith('agt_'), isFalse);
-      expect(selectedModel.id, isNot(equals(agent.id)));
-
-      // Verify 4: Conversation preserved metadata: agentId, agentTitle, and systemRole
-      final selectedConv = selectionNotifier.lastSelectedConversation;
-      expect(selectedConv, isNotNull);
-      expect(selectedConv!.metadata['agentId'], equals('agent_coder_42'));
-      expect(selectedConv.metadata['agentTitle'], equals('DeepSeek Coding Specialist'));
-      expect(
-        selectedConv.metadata['systemRole'],
-        equals('You are an expert Flutter systems architect.'),
-      );
-
-      // Verify 5: mainNavigationIndexProvider navigated to Tab 0 (Chats)
-      expect(container.read(mainNavigationIndexProvider), equals(0));
+  testWidgets('online creation binds exact Agent and survives production reload and Drift reopen', (tester) async {
+    final harness = RoleHarness();
+    addTearDown(harness.close);
+    final context = await _host(tester, harness);
+    expect(await _start(tester, harness, context), isTrue);
+    expect(harness.creationPayloads.single, {
+      'title': roleAgent.title,
+      'agentId': roleAgent.id,
     });
+    expect(harness.detailCalls, greaterThanOrEqualTo(2));
+    final active = harness.container.read(activeConversationProvider)!;
+    expect(active.id, 'tpc_verified');
+    expect(active.model, roleAgent.model);
+    expect(active.metadata, containsPair('backend', 'lobehub'));
+    expect(active.metadata, containsPair('agentId', roleAgent.id));
+    expect(active.metadata, containsPair('agentTitle', roleAgent.title));
+    expect(active.metadata, containsPair('agentModel', roleAgent.model));
+    expect(active.metadata, containsPair('provider', roleAgent.provider));
+    expect(harness.container.read(selectedModelProvider)!.metadata?['provider'], 'deepseek');
+    expect(harness.container.read(selectedModelProvider)!.id, isNot(roleAgent.id));
+    expect(harness.container.read(mainNavigationIndexProvider), 0);
+    expect(harness.container.read(lobehubChatStartProvider).isStarting, isFalse);
 
-    testWidgets('does not fallback to firstAgent or set agt_ as model when agent model is not in roster', (
-      tester,
-    ) async {
-      final topicsNotifier = _FakeLobeTopicsNotifier();
-      final selectionNotifier = _FakeConversationSelection();
-
-      final agentWithAgt = const LobeAgent(
-        id: 'agt_writer_99',
-        title: 'Essayist',
-        model: 'agt_writer_99', // Malformed or self-referential agent model
-        provider: null,
-      );
-
-      final rosterModels = [
-        const Model(id: 'gpt-4o', name: 'GPT-4o'),
-      ];
-
-      final container = ProviderContainer(
-        overrides: [
-          activeServerProvider.overrideWith(
-            (ref) => Future.value(
-              const ServerConfig(
-                id: 'lobehub_self_hosted',
-                name: 'LobeHub',
-                url: 'https://ai.example.com',
-              ),
-            ),
-          ),
-          lobeHubApiClientProvider.overrideWith((ref) => null),
-          lobeTopicsProvider.overrideWith(() => topicsNotifier),
-          conversationSelectionProvider.overrideWith(() => selectionNotifier),
-          modelsProvider.overrideWith(() => _TestModelsNotifier(rosterModels)),
-        ],
-      );
-      addTearDown(container.dispose);
-
-      late BuildContext buildContext;
-      await tester.pumpWidget(
-        UncontrolledProviderScope(
-          container: container,
-          child: MaterialApp(
-            theme: ThemeData.light(),
-            home: Scaffold(
-              body: Builder(
-                builder: (context) {
-                  buildContext = context;
-                  return const Text('Test Host');
-                },
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      final success = await container
-          .read(lobehubChatStartProvider.notifier)
-          .startAgentChat(
-            context: buildContext,
-            agent: agentWithAgt,
-          );
-
-      expect(success, isTrue);
-
-      // Verify that agt_ was NOT set as selectedModel
-      final selectedModel = container.read(selectedModelProvider);
-      if (selectedModel != null) {
-        expect(selectedModel.id.startsWith('agt_'), isFalse);
-      }
+    await tester.runAsync(() async {
+      await harness.container.read(syncEngineProvider.notifier).pullChatNow(active.id);
+      final row = await harness.database.chatsDao.getChat(active.id);
+      expect(row, isNotNull);
+      expect(jsonDecode(row!.meta), containsPair('agentId', roleAgent.id));
+      expect(jsonDecode(row.meta), containsPair('provider', roleAgent.provider));
+      harness.container.read(activeConversationProvider.notifier).clear();
+      harness.container.read(selectedModelProvider.notifier).set(foreignModel);
+      final reopened = await harness.container
+          .read(conversationSelectionProvider.notifier).select(active);
+      expect(reopened.disposition, ConversationSelectionDisposition.committed);
     });
-
-    testWidgets('displays error SnackBar and does NOT switch tab when topic creation fails', (
-      tester,
-    ) async {
-      final failingTopicsNotifier = _FakeLobeTopicsNotifier(shouldThrow: true);
-      final selectionNotifier = _FakeConversationSelection();
-
-      const agent = LobeAgent(
-        id: 'agent_error',
-        title: 'Error Agent',
-      );
-
-      final container = ProviderContainer(
-        overrides: [
-          activeServerProvider.overrideWith(
-            (ref) => Future.value(
-              const ServerConfig(
-                id: 'lobehub_self_hosted',
-                name: 'LobeHub',
-                url: 'https://ai.example.com',
-              ),
-            ),
-          ),
-          lobeHubApiClientProvider.overrideWith((ref) => null),
-          lobeTopicsProvider.overrideWith(() => failingTopicsNotifier),
-          conversationSelectionProvider.overrideWith(() => selectionNotifier),
-          mainNavigationIndexProvider.overrideWith(() => _TestNavigationNotifier(1)), // On Agents tab
-        ],
-      );
-      addTearDown(container.dispose);
-
-      late BuildContext buildContext;
-      await tester.pumpWidget(
-        UncontrolledProviderScope(
-          container: container,
-          child: MaterialApp(
-            theme: ThemeData.light(),
-            home: Scaffold(
-              body: Builder(
-                builder: (context) {
-                  buildContext = context;
-                  return const Text('Test Host');
-                },
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      final success = await container
-          .read(lobehubChatStartProvider.notifier)
-          .startAgentChat(
-            context: buildContext,
-            agent: agent,
-          );
-
-      expect(success, isFalse);
-      await tester.pump();
-
-      // Verify SnackBar with error is visible
-      expect(find.byType(SnackBar), findsOneWidget);
-      expect(find.textContaining('Failed to create topic'), findsOneWidget);
-
-      // CRITICAL: Navigation index must NOT tab to 0 on failure!
-      expect(container.read(mainNavigationIndexProvider), equals(1));
-    });
-
-    testWidgets('displays error SnackBar and does NOT switch tab when selection fails', (
-      tester,
-    ) async {
-      final topicsNotifier = _FakeLobeTopicsNotifier();
-      final failingSelection = _FakeConversationSelection(shouldFail: true);
-
-      const agent = LobeAgent(
-        id: 'agent_select_fail',
-        title: 'Fail Selection Agent',
-      );
-
-      final container = ProviderContainer(
-        overrides: [
-          activeServerProvider.overrideWith(
-            (ref) => Future.value(
-              const ServerConfig(
-                id: 'lobehub_self_hosted',
-                name: 'LobeHub',
-                url: 'https://ai.example.com',
-              ),
-            ),
-          ),
-          lobeHubApiClientProvider.overrideWith((ref) => null),
-          lobeTopicsProvider.overrideWith(() => topicsNotifier),
-          conversationSelectionProvider.overrideWith(() => failingSelection),
-          mainNavigationIndexProvider.overrideWith(() => _TestNavigationNotifier(1)), // On Agents tab
-        ],
-      );
-      addTearDown(container.dispose);
-
-      late BuildContext buildContext;
-      await tester.pumpWidget(
-        UncontrolledProviderScope(
-          container: container,
-          child: MaterialApp(
-            theme: ThemeData.light(),
-            home: Scaffold(
-              body: Builder(
-                builder: (context) {
-                  buildContext = context;
-                  return const Text('Test Host');
-                },
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      final success = await container
-          .read(lobehubChatStartProvider.notifier)
-          .startAgentChat(
-            context: buildContext,
-            agent: agent,
-          );
-
-      expect(success, isFalse);
-      await tester.pump();
-
-      // Verify SnackBar shown and tab did not change
-      expect(find.byType(SnackBar), findsOneWidget);
-      expect(container.read(mainNavigationIndexProvider), equals(1));
-    });
+    final reopened = harness.container.read(activeConversationProvider)!;
+    expect(reopened.model, roleAgent.model);
+    expect(reopened.metadata['agentTitle'], roleAgent.title);
+    expect(reopened.metadata['agentId'], roleAgent.id);
+    expect(reopened.metadata['provider'], roleAgent.provider);
   });
 
-  group('LobeHub REST Media Capability Limitation & Warning', () {
-    testWidgets('shows media capability limitation banner inside AgentActionsModalSheet', (
-      tester,
-    ) async {
-      const agent = LobeAgent(
-        id: 'agent_banner_test',
-        title: 'Creative Assistant',
-        model: 'gpt-4o',
-      );
+  testWidgets('missing client cannot fabricate a successful offline Agent topic', (tester) async {
+    final harness = RoleHarness(clientAvailable: false);
+    addTearDown(harness.close);
+    final context = await _host(tester, harness);
+    expect(await _start(tester, harness, context), isFalse);
+    _expectFailure(harness);
+    expect(harness.creationPayloads, isEmpty);
+    await tester.pump();
+    expect(find.byType(SnackBar), findsOneWidget);
+  });
 
-      final container = ProviderContainer(
-        overrides: [
-          activeServerProvider.overrideWith(
-            (ref) => Future.value(
-              const ServerConfig(
-                id: 'lobehub_self_hosted',
-                name: 'LobeHub',
-                url: 'https://ai.example.com',
-              ),
-            ),
-          ),
-          lobeHubApiClientProvider.overrideWith((ref) => null),
-          lobeAgentsProvider.overrideWith(
-            () => _TestAgentsNotifier(
-              const LobeAgentsState(agents: [agent]),
-            ),
-          ),
-        ],
-      );
-      addTearDown(container.dispose);
-
-      await tester.pumpWidget(
-        UncontrolledProviderScope(
-          container: container,
-          child: MaterialApp(
-            theme: ThemeData.light(),
-            localizationsDelegates: conduitLocalizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: const Scaffold(
-              body: LobehubAgentsPage(),
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      // Tap agent card to open bottom sheet
-      await tester.tap(find.byKey(const ValueKey('agent-card-agent_banner_test')));
-      await tester.pumpAndSettle();
-
-      // Verify the media limitation disclaimer banner is visible immediately without spinner
-      expect(
-        find.byKey(const ValueKey('agent-actions-media-notice-banner')),
-        findsOneWidget,
-      );
-      expect(
-        find.textContaining('Server REST (2.2.17) lacks image and file analysis support'),
-        findsOneWidget,
-      );
+  for (final status in [401, 500]) {
+    testWidgets('Agent detail HTTP $status is visible and never uses stale card configuration', (tester) async {
+      final harness = RoleHarness()..detailStatus = status;
+      addTearDown(harness.close);
+      final context = await _host(tester, harness);
+      expect(await _start(tester, harness, context), isFalse);
+      _expectFailure(harness);
+      expect(harness.creationPayloads, isEmpty);
+      await tester.pump();
+      expect(find.byType(SnackBar), findsOneWidget);
     });
+  }
 
-    testWidgets('tapping Start New Chat in LobehubAgentsPage triggers real binding startAgentChat', (
-      tester,
-    ) async {
-      final topicsNotifier = _FakeLobeTopicsNotifier();
-      final selectionNotifier = _FakeConversationSelection();
+  testWidgets('unavailable configured provider does not match ID-only or invent a model', (tester) async {
+    final harness = RoleHarness()..models.removeWhere((model) => model['provider'] == 'deepseek');
+    addTearDown(harness.close);
+    final context = await _host(tester, harness);
+    expect(await _start(tester, harness, context), isFalse);
+    _expectFailure(harness);
+    expect(harness.creationPayloads, isEmpty);
+    expect(harness.container.read(lobehubChatStartProvider).error, contains('deepseek'));
+  });
 
-      const agent = LobeAgent(
-        id: 'agent_start_test',
-        title: 'Autonomous Researcher',
-        model: 'gpt-4o',
-      );
+  testWidgets('self-referential Agent model is rejected rather than dispatching first roster entry', (tester) async {
+    final harness = RoleHarness()..detail = roleAgent.copyWith(model: roleAgent.id).toJson();
+    addTearDown(harness.close);
+    final context = await _host(tester, harness);
+    expect(await _start(tester, harness, context), isFalse);
+    _expectFailure(harness);
+    expect(harness.creationPayloads, isEmpty);
+  });
 
-      final container = ProviderContainer(
-        overrides: [
-          activeServerProvider.overrideWith(
-            (ref) => Future.value(
-              const ServerConfig(
-                id: 'lobehub_self_hosted',
-                name: 'LobeHub',
-                url: 'https://ai.example.com',
-              ),
-            ),
-          ),
-          apiServiceProvider.overrideWith((ref) => null),
-          reviewerModeProvider.overrideWith(() => _TestReviewerModeNotifier(false)),
-          selectedModelProvider.overrideWith(() => _TestSelectedModelNotifier()),
-          lobeHubApiClientProvider.overrideWith((ref) => null),
-          lobeTopicsProvider.overrideWith(() => topicsNotifier),
-          conversationSelectionProvider.overrideWith(() => selectionNotifier),
-          lobeAgentsProvider.overrideWith(
-            () => _TestAgentsNotifier(
-              const LobeAgentsState(agents: [agent]),
-            ),
-          ),
-          mainNavigationIndexProvider.overrideWith(() => _TestNavigationNotifier(1)),
-        ],
-      );
-      addTearDown(container.dispose);
+  testWidgets('failed topic POST keeps model and Agents tab unchanged', (tester) async {
+    final harness = RoleHarness()..creationStatus = 500;
+    addTearDown(harness.close);
+    final context = await _host(tester, harness);
+    expect(await _start(tester, harness, context), isFalse);
+    _expectFailure(harness);
+    await tester.pump();
+    expect(find.byType(SnackBar), findsOneWidget);
+    expect(find.textContaining('Failed to create topic'), findsOneWidget);
+  });
 
-      await tester.pumpWidget(
-        UncontrolledProviderScope(
-          container: container,
-          child: MaterialApp(
-            theme: ThemeData.light(),
-            localizationsDelegates: conduitLocalizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: const Scaffold(
-              body: LobehubAgentsPage(),
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      // Open bottom sheet
-      await tester.tap(find.byKey(const ValueKey('agent-card-agent_start_test')));
-      await tester.pumpAndSettle();
-
-      // Tap action-start-new-chat
-      await tester.tap(find.byKey(const ValueKey('action-start-new-chat')));
-      await tester.pumpAndSettle();
-
-      // Verified real topic created and bound
-      expect(topicsNotifier.lastCreatedTopic, isNotNull);
-      expect(topicsNotifier.lastCreatedTopic!.agentId, equals('agent_start_test'));
+  for (final returnedAgent in [null, 'agt_someone_else']) {
+    testWidgets('returned topic Agent $returnedAgent must not be patched into apparent success', (tester) async {
+      final harness = RoleHarness()..returnedAgentId = returnedAgent;
+      addTearDown(harness.close);
+      final context = await _host(tester, harness);
+      expect(await _start(tester, harness, context), isFalse);
+      _expectFailure(harness);
     });
+  }
+
+  for (final returnedId in ['', 'local_123', 'local:123']) {
+    testWidgets('unverified topic ID "$returnedId" is rejected', (tester) async {
+      final harness = RoleHarness()..returnedTopicId = returnedId;
+      addTearDown(harness.close);
+      final context = await _host(tester, harness);
+      expect(await _start(tester, harness, context), isFalse);
+      _expectFailure(harness);
+    });
+  }
+
+  testWidgets('detail identity mismatch cannot start another Agent', (tester) async {
+    final harness = RoleHarness()..detail = roleAgent.copyWith(id: 'agt_wrong').toJson();
+    addTearDown(harness.close);
+    final context = await _host(tester, harness);
+    expect(await _start(tester, harness, context), isFalse);
+    _expectFailure(harness);
+    expect(harness.creationPayloads, isEmpty);
+  });
+
+  testWidgets('production selection reload failure keeps original model and tab', (tester) async {
+    final harness = RoleHarness()..reloadStatus = 500;
+    addTearDown(harness.close);
+    final context = await _host(tester, harness);
+    expect(await _start(tester, harness, context), isFalse);
+    _expectFailure(harness);
+  });
+
+  for (final stage in ['detail', 'models', 'create', 'reload']) {
+    testWidgets('same API account swap during $stage has no stale model/tab/selection commit', (tester) async {
+      final harness = RoleHarness();
+      addTearDown(harness.close);
+      Future<void> swap() async => harness.changeAccount('synthetic-account-b');
+      switch (stage) {
+        case 'detail': harness.beforeDetail = swap;
+        case 'models': harness.beforeModels = swap;
+        case 'create': harness.beforeCreate = swap;
+        case 'reload': harness.beforeReload = swap;
+      }
+      final context = await _host(tester, harness);
+      expect(await _start(tester, harness, context), isFalse);
+      _expectFailure(harness);
+      if (stage == 'detail' || stage == 'models') {
+        expect(harness.creationPayloads, isEmpty);
+      }
+    });
+  }
+
+  testWidgets('expired authentication fails closed before any HTTP request', (tester) async {
+    final harness = RoleHarness();
+    addTearDown(harness.close);
+    final context = await _host(tester, harness);
+    harness.changeAccount(null);
+    expect(await _start(tester, harness, context), isFalse);
+    _expectFailure(harness);
+    expect(harness.adapter.requests, isEmpty);
+  });
+
+  testWidgets('unmounted host settles isStarting without late activation', (tester) async {
+    final harness = RoleHarness();
+    addTearDown(harness.close);
+    final context = await _host(tester, harness);
+    late Completer<void> entered;
+    late Completer<void> released;
+    late Future<bool> pending;
+    await tester.runAsync(() async {
+      entered = Completer<void>();
+      released = Completer<void>();
+      harness.beforeDetail = () async {
+        entered.complete();
+        await released.future;
+      };
+      pending = harness.container.read(lobehubChatStartProvider.notifier)
+          .startAgentChat(context: context, agent: roleAgent);
+      await entered.future;
+    });
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(await tester.runAsync(() async {
+      released.complete();
+      return pending;
+    }), isFalse);
+    expect(harness.container.read(lobehubChatStartProvider).isStarting, isFalse);
+    expect(harness.container.read(activeConversationProvider), isNull);
+    expect(harness.creationPayloads, isEmpty);
+  });
+
+  testWidgets('Agent sheet retains REST media notice and uses actual online start action', (tester) async {
+    final harness = RoleHarness();
+    addTearDown(harness.close);
+    await tester.runAsync(harness.initialize);
+    await tester.pumpWidget(UncontrolledProviderScope(
+      container: harness.container,
+      child: MaterialApp(
+        theme: ThemeData.light(),
+        localizationsDelegates: conduitLocalizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: const Scaffold(body: LobehubAgentsPage()),
+      ),
+    ));
+    await tester.runAsync(() async {
+      await Future<void>.delayed(Duration.zero);
+    });
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(ValueKey('agent-card-${roleAgent.id}')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('agent-actions-media-notice-banner')), findsOneWidget);
+    expect(find.textContaining('Server REST (2.2.17) lacks image and file analysis support'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('action-start-new-chat')));
+    await tester.runAsync(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pumpAndSettle();
+    expect(harness.creationPayloads.single['agentId'], roleAgent.id);
+    expect(harness.container.read(activeConversationProvider)!.metadata['agentId'], roleAgent.id);
+    expect(harness.container.read(mainNavigationIndexProvider), 0);
   });
 }

@@ -1,17 +1,14 @@
-import 'dart:async';
-
 import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'package:conduit_core/auth/auth_state_manager.dart';
+import 'package:conduit_core/database/chat_database_repository.dart';
 import 'package:conduit_core/features/lobehub/models/lobe_agent.dart';
-import 'package:conduit_core/features/lobehub/models/lobe_topic.dart';
-import 'package:conduit_core/features/lobehub/providers/lobehub_topics_provider.dart';
+import 'package:conduit_core/features/lobehub/providers/lobehub_agents_provider.dart';
 import 'package:conduit_core/features/lobehub/services/lobehub_api_client.dart';
 import 'package:conduit_core/features/lobehub/services/lobehub_mappers.dart';
 import 'package:conduit_core/models/conversation.dart';
-import 'package:conduit_core/models/model.dart';
+import 'package:conduit_core/models/server_config.dart';
 import 'package:conduit_core/providers/app_providers.dart';
 
 import '../../navigation/providers/conversation_selection_provider.dart';
@@ -67,182 +64,129 @@ class LobehubChatStartNotifier extends Notifier<LobehubChatStartState> {
     required BuildContext context,
     required LobeAgent agent,
   }) async {
-    state = state.copyWith(isStarting: true, error: null);
-
-    // 1. Initial connection & auth check
-    LobeHubApiClient? client;
+    if (state.isStarting) return false;
+    state = const LobehubChatStartState(isStarting: true);
+    var action = 'Failed to prepare Agent';
     try {
-      client = ref.read(lobeHubApiClientProvider);
-    } catch (_) {
-      client = null;
-    }
-
-    String? initialToken;
-    try {
-      final initialApi = ref.read(apiServiceProvider);
-      initialToken = initialApi?.authToken;
-    } catch (_) {
-      initialToken = null;
-    }
-
-    if (!_isAuthValid()) {
-      _reportError(context, 'Authentication required to start chat.');
-      return false;
-    }
-
-    // 2. Refresh or retrieve full agent details if available
-    LobeAgent fullAgent = agent;
-    if (client != null) {
-      try {
-        fullAgent = await client.getAgent(agent.id);
-      } catch (_) {
-        // Fall back gracefully to provided agent representation
-        fullAgent = agent;
+      final api = ref.read(apiServiceProvider);
+      final client = ref.read(lobeHubApiClientProvider);
+      final owner = captureOpenWebUiConversationSelectionOwner(ref);
+      if (api == null || client == null || !api.serverConfig.isLobeHub) {
+        throw StateError('An online LobeHub connection is required to start chat.');
       }
-    }
-
-    // Verify auth context survived the async call
-    if (!context.mounted) return false;
-    try {
-      final afterApi = ref.read(apiServiceProvider);
-      if (initialToken != null && afterApi?.authToken == null) {
-        _reportError(context, 'Authentication expired while preparing agent.');
-        return false;
+      if (owner == null || api.authToken != owner.authToken) {
+        throw StateError('Authentication required to start chat.');
       }
-    } catch (_) {}
-
-    if (!_isAuthValid()) {
-      _reportError(context, 'Authentication expired while preparing agent.');
-      return false;
-    }
-
-    // 3. Select actual underlying model from roster by BOTH modelID and provider
-    final targetModelId = fullAgent.model ?? agent.model;
-    final targetProvider = fullAgent.provider ?? agent.provider;
-
-    List<Model> roster = const <Model>[];
-    try {
-      final modelsAsync = ref.read(modelsProvider);
-      roster = modelsAsync.hasValue
-          ? modelsAsync.value!
-          : await ref.read(modelsProvider.future);
-    } catch (_) {}
-
-    Model? resolvedModel;
-    if (targetModelId != null && targetModelId.isNotEmpty) {
-      // Step A: Priority match by BOTH modelId and provider
-      if (targetProvider != null && targetProvider.isNotEmpty) {
-        resolvedModel = roster.firstWhereOrNull((m) {
-          if (m.id != targetModelId) return false;
-          final p = m.metadata?['provider']?.toString() ??
-              m.metadata?['providerId']?.toString() ??
-              m.metadata?['owned_by']?.toString();
-          return p?.toLowerCase() == targetProvider.toLowerCase();
-        });
+      if (client.baseUrl != LobeHubApiClient.normalizeBaseUrl(api.serverConfig.url)) {
+        throw StateError('The Agent client does not belong to the current server.');
       }
-      // Step B: Secondary match by modelId alone
-      resolvedModel ??= roster.firstWhereOrNull((m) => m.id == targetModelId);
-    }
+      final authenticationEpoch = api.authenticationEpoch;
+      final server = ref.read(activeServerProvider).value;
 
-    // Guard: Do not fallback to firstAgent and do not set `agt_` as model
-    if (resolvedModel != null) {
-      ref.read(selectedModelProvider.notifier).set(resolvedModel, allowHidden: true);
-      ref.read(isManualModelSelectionProvider.notifier).set(true);
-    } else if (targetModelId != null &&
-        !targetModelId.startsWith('agt_') &&
-        targetModelId.isNotEmpty) {
-      // Retain true underlying model identifier without setting agt_ as model
-      final placeholderModel = Model(
-        id: targetModelId,
-        name: targetModelId,
-        metadata: <String, dynamic>{
-          if (targetProvider != null) 'provider': targetProvider,
-        },
-      );
-      ref
-          .read(selectedModelProvider.notifier)
-          .set(placeholderModel, allowHidden: true);
-      ref.read(isManualModelSelectionProvider.notifier).set(true);
-    }
+      void requireCurrentOwner() {
+        if (!ref.mounted ||
+            !context.mounted ||
+            !identical(ref.read(apiServiceProvider), api) ||
+            !identical(ref.read(lobeHubApiClientProvider), client) ||
+            ref.read(activeServerProvider).value != server ||
+            api.authenticationEpoch != authenticationEpoch ||
+            !openWebUiConversationSelectionOwnerIsCurrent(ref, owner)) {
+          throw StateError('Account or server changed while starting the Agent chat. Please retry.');
+        }
+      }
 
-    // 4. Create server topic bound to chosenAgent
-    final effectiveTitle = (fullAgent.title?.trim().isNotEmpty == true)
-        ? fullAgent.title!.trim()
-        : (fullAgent.name?.trim().isNotEmpty == true
-            ? fullAgent.name!.trim()
-            : 'New Chat');
-
-    final effectiveSystemRole =
-        fullAgent.systemRole?.trim().isNotEmpty == true
-            ? fullAgent.systemRole!.trim()
-            : agent.systemRole?.trim();
-
-    LobeTopic createdTopic;
-    try {
-      createdTopic = await ref.read(lobeTopicsProvider.notifier).createTopic(
+      requireCurrentOwner();
+      final fullAgent = await client.getAgent(agent.id);
+      requireCurrentOwner();
+      if (fullAgent.id.isEmpty || fullAgent.id != agent.id) {
+        throw StateError('Agent details do not match the selected Agent.');
+      }
+      final modelId = fullAgent.model?.trim();
+      final provider = fullAgent.provider?.trim();
+      if (modelId == null || modelId.isEmpty || modelId.startsWith('agt_') ||
+          modelId == fullAgent.id || provider == null || provider.isEmpty) {
+        throw StateError('The Agent has no valid underlying model/provider configuration.');
+      }
+      final roster = await ref.read(modelsProvider.future);
+      requireCurrentOwner();
+      final resolvedModel = roster.firstWhereOrNull((model) {
+        final modelProvider = model.metadata?['provider'] ??
+            model.metadata?['providerId'] ?? model.metadata?['owned_by'];
+        return model.id == modelId && modelProvider?.toString() == provider;
+      });
+      if (resolvedModel == null) {
+        throw StateError('Configured model "$modelId" from provider "$provider" is unavailable. Check the Agent configuration on LobeHub.');
+      }
+      final title = fullAgent.title?.trim();
+      final effectiveTitle = title == null || title.isEmpty ? fullAgent.id : title;
+      action = 'Failed to create topic';
+      final createdTopic = await client.createTopic(
         title: effectiveTitle,
         agentId: fullAgent.id,
-        metadata: <String, dynamic>{
-          'agentId': fullAgent.id,
-          'agentTitle': effectiveTitle,
-          if (effectiveSystemRole != null && effectiveSystemRole.isNotEmpty)
-            'systemRole': effectiveSystemRole,
-          if (targetModelId != null) 'agentModel': targetModelId,
-          if (targetProvider != null) 'agentProvider': targetProvider,
-        },
       );
-    } catch (error) {
-      if (!context.mounted) return false;
-      _reportError(context, 'Failed to create topic: $error');
-      return false;
-    }
-
-    // 5. Build Conduit Conversation model preserving agent metadata & systemRole
-    final effectiveModelForConversation = resolvedModel?.id ??
-        (targetModelId != null && !targetModelId.startsWith('agt_')
-            ? targetModelId
-            : null);
-
-    final conversation = lobeTopicToConversation(createdTopic).copyWith(
-      model: effectiveModelForConversation,
-      metadata: <String, dynamic>{
-        ...createdTopic.metadata,
-        'agentId': fullAgent.id,
-        'agentTitle': effectiveTitle,
-        if (effectiveSystemRole != null && effectiveSystemRole.isNotEmpty) ...{
-          'systemRole': effectiveSystemRole,
-          'system': effectiveSystemRole,
-        },
-        'lobeTopic': createdTopic.toJson(),
-        'lobeMetadata': createdTopic.metadata,
-      },
-    );
-
-    // 6. Activate conversation via conversationSelectionProvider seam
-    final selectionResult = await ref
-        .read(conversationSelectionProvider.notifier)
-        .select(conversation);
-
-    if (selectionResult.disposition ==
-        ConversationSelectionDisposition.committed) {
-      state = state.copyWith(isStarting: false);
-      if (context.mounted) {
-        // Navigate seamlessly to Chats tab on success
-        ref.read(mainNavigationIndexProvider.notifier).state = 0;
+      requireCurrentOwner();
+      if (createdTopic.id.trim().isEmpty ||
+          createdTopic.id.startsWith('local_') ||
+          createdTopic.id.startsWith('local:') ||
+          createdTopic.agentId != agent.id) {
+        throw StateError('The server did not return a verified topic bound to the selected Agent.');
       }
+      final systemRole = fullAgent.systemRole?.trim();
+      final conversation = withChatStorageProvenance(
+        lobeTopicToConversation(createdTopic).copyWith(
+          model: modelId,
+          systemPrompt: systemRole,
+          metadata: <String, dynamic>{
+            ...createdTopic.metadata,
+            'backend': 'lobehub',
+            'agentId': fullAgent.id,
+            'agentTitle': effectiveTitle,
+            'agentModel': modelId,
+            'provider': provider,
+            if (systemRole != null && systemRole.isNotEmpty) 'systemRole': systemRole,
+            'lobeTopic': createdTopic.toJson(),
+          },
+        ),
+        ChatStorageKind.openWebUi,
+      );
+      action = 'Failed to activate Agent conversation';
+      final selection = await ref.read(conversationSelectionProvider.notifier)
+          .select(conversation);
+      requireCurrentOwner();
+      if (selection.disposition != ConversationSelectionDisposition.committed) {
+        throw StateError(selection.error?.toString() ?? 'Conversation selection was canceled.');
+      }
+      final active = ref.read(activeConversationProvider);
+      if (active?.id != createdTopic.id ||
+          active?.metadata['backend'] != 'lobehub' ||
+          active?.metadata['agentId'] != agent.id ||
+          active?.metadata['agentModel'] != modelId ||
+          active?.metadata['provider'] != provider) {
+        throw StateError('Reloaded conversation does not match the verified Agent configuration.');
+      }
+      ref.read(selectedModelProvider.notifier).set(resolvedModel, allowHidden: true);
+      requireCurrentOwner();
+      ref.read(isManualModelSelectionProvider.notifier).set(true);
+      requireCurrentOwner();
+      ref.read(mainNavigationIndexProvider.notifier).state = 0;
       return true;
+    } catch (error) {
+      if (ref.mounted) {
+        final message = '$action: $error';
+        state = state.copyWith(isStarting: false, error: message);
+        if (context.mounted) {
+          _reportError(context, message);
+        }
+      }
+      return false;
+    } finally {
+      if (ref.mounted) {
+        state = state.copyWith(isStarting: false, error: state.error);
+      }
     }
-
-    // If failed or canceled, keep tab position and show error visible in SnackBar
-    final errMsg = selectionResult.error?.toString() ??
-        'Conversation selection failed or was canceled.';
-    if (!context.mounted) return false;
-    _reportError(context, errMsg);
-    return false;
   }
 
   void _reportError(BuildContext context, String message) {
-    state = state.copyWith(isStarting: false, error: message);
     if (context.mounted) {
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
         SnackBar(
@@ -253,13 +197,4 @@ class LobehubChatStartNotifier extends Notifier<LobehubChatStartState> {
     }
   }
 
-  bool _isAuthValid() {
-    try {
-      final authState = ref.read(authStateManagerProvider).asData?.value;
-      if (authState != null) {
-        return authState.isAuthenticated;
-      }
-    } catch (_) {}
-    return true;
-  }
 }
