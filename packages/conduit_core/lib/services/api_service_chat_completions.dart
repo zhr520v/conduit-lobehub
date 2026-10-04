@@ -21,14 +21,14 @@ class LobeAgentCorrelation {
   final DateTime createdAt;
 
   Map<String, dynamic> toJson() => {
-        'topicId': topicId,
-        'agentId': agentId,
-        'userText': userText,
-        'userLocalId': userLocalId,
-        'assistantLocalId': assistantLocalId,
-        'snapshotServerIds': snapshotServerIds.toList(),
-        'createdAt': createdAt.toIso8601String(),
-      };
+    'topicId': topicId,
+    'agentId': agentId,
+    'userText': userText,
+    'userLocalId': userLocalId,
+    'assistantLocalId': assistantLocalId,
+    'snapshotServerIds': snapshotServerIds.toList(),
+    'createdAt': createdAt.toIso8601String(),
+  };
 
   factory LobeAgentCorrelation.fromJson(Map<String, dynamic> json) =>
       LobeAgentCorrelation(
@@ -37,7 +37,8 @@ class LobeAgentCorrelation {
         userText: json['userText']?.toString() ?? '',
         userLocalId: json['userLocalId']?.toString() ?? '',
         assistantLocalId: json['assistantLocalId']?.toString() ?? '',
-        snapshotServerIds: (json['snapshotServerIds'] as List<dynamic>?)
+        snapshotServerIds:
+            (json['snapshotServerIds'] as List<dynamic>?)
                 ?.map((e) => e.toString())
                 .toSet() ??
             const <String>{},
@@ -671,7 +672,8 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
   Future<LobeReconcileResult> reconcileAgentTurn(
     LobeAgentCorrelation correlation,
   ) async {
-    if (correlation.topicId.isEmpty || correlation.topicId.startsWith('local:')) {
+    if (correlation.topicId.isEmpty ||
+        correlation.topicId.startsWith('local:')) {
       return const LobeReconcileResult(
         success: false,
         errorMessage: 'Local or empty topic cannot be reconciled',
@@ -680,8 +682,10 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
     }
 
     try {
-      final allMessages =
-          await fetchAllLobeHubMessages(_dio, topicId: correlation.topicId);
+      final allMessages = await fetchAllLobeHubMessages(
+        _dio,
+        topicId: correlation.topicId,
+      );
       final newMessages = <Map<String, dynamic>>[];
       for (final item in allMessages) {
         final id = item['id']?.toString() ?? '';
@@ -722,8 +726,9 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
       }).toList();
 
       if (assistantCandidates.isEmpty) {
-        assistantCandidates =
-            newMessages.where((m) => m['role'] == 'assistant').toList();
+        assistantCandidates = newMessages
+            .where((m) => m['role'] == 'assistant')
+            .toList();
       }
 
       if (assistantCandidates.isEmpty) {
@@ -738,20 +743,27 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
         return LobeReconcileResult(
           success: false,
           serverUserId: serverUserId,
-          errorMessage:
-              'Ambiguous: multiple candidate assistant messages found after snapshot',
+          errorMessage: 'Ambiguous: multiple candidate assistant messages found after snapshot',
           ambiguous: true,
         );
       }
       final assistantMsg = assistantCandidates.single;
+      if (!lobeHubAssistantResultComplete(assistantMsg)) {
+        return LobeReconcileResult(
+          success: false,
+          serverUserId: serverUserId,
+          errorMessage:
+              'Persisted assistant has no successful completed result.',
+        );
+      }
       final serverAssistantId = assistantMsg['id'].toString();
 
       // Patch user message metadata merging existing
       final userExistingMeta = userMsg['metadata'] is Map
           ? Map<String, dynamic>.from(userMsg['metadata'] as Map)
           : (userMsg['meta'] is Map
-              ? Map<String, dynamic>.from(userMsg['meta'] as Map)
-              : <String, dynamic>{});
+                ? Map<String, dynamic>.from(userMsg['meta'] as Map)
+                : <String, dynamic>{});
       userExistingMeta['conduitClientId'] = correlation.userLocalId;
       await _dio.patch(
         '/api/v1/messages/$serverUserId',
@@ -762,8 +774,8 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
       final asstExistingMeta = assistantMsg['metadata'] is Map
           ? Map<String, dynamic>.from(assistantMsg['metadata'] as Map)
           : (assistantMsg['meta'] is Map
-              ? Map<String, dynamic>.from(assistantMsg['meta'] as Map)
-              : <String, dynamic>{});
+                ? Map<String, dynamic>.from(assistantMsg['meta'] as Map)
+                : <String, dynamic>{});
       asstExistingMeta['conduitClientId'] = correlation.assistantLocalId;
       await _dio.patch(
         '/api/v1/messages/$serverAssistantId',
@@ -794,13 +806,14 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
     required List<Map<String, dynamic>>? files,
     required String? lobeAgentId,
     required Future<void> Function(LobeAgentCorrelation correlation)?
-        onPreDispatch,
+    onPreDispatch,
     required String? sessionId,
     required Future<void> Function() abort,
     required void Function(CancelToken token) activeCancelTokenCallback,
   }) async {
     // 1. Reject multipart/file inference typedSyncTerminalException400 before any inference POST
-    final hasFiles = (files != null && files.isNotEmpty) ||
+    final hasFiles =
+        (files != null && files.isNotEmpty) ||
         (userMessage != null &&
             ((userMessage['files'] is List &&
                     (userMessage['files'] as List).isNotEmpty) ||
@@ -808,25 +821,26 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
                     (userMessage['attachment_ids'] as List).isNotEmpty) ||
                 (userMessage['embeds'] is List &&
                     (userMessage['embeds'] as List).isNotEmpty))) ||
-        messages.any((m) =>
-            (m['files'] is List && (m['files'] as List).isNotEmpty) ||
-            (m['attachment_ids'] is List &&
-                (m['attachment_ids'] as List).isNotEmpty) ||
-            (m['embeds'] is List && (m['embeds'] as List).isNotEmpty) ||
-            m['content'] is List);
+        messages.any(
+          (m) =>
+              (m['files'] is List && (m['files'] as List).isNotEmpty) ||
+              (m['attachment_ids'] is List &&
+                  (m['attachment_ids'] as List).isNotEmpty) ||
+              (m['embeds'] is List && (m['embeds'] as List).isNotEmpty) ||
+              m['content'] is List,
+        );
 
     if (hasFiles) {
       throw const SyncTerminalException(
         statusCode: 400,
-        message:
-            'LobeHub REST v2.2.17 does not support file or image attachments in inference requests.',
+        message: 'LobeHub REST v2.2.17 does not support file or image attachments in inference requests.',
       );
     }
 
-    // 2. Add optional lobeAgentId parameter explicit; derive verifiedAgent from actualtopic if no param.
-    String? resolvedAgentId = lobeAgentId;
-    if ((resolvedAgentId == null || resolvedAgentId.isEmpty) &&
-        conversationId != null &&
+    String? resolvedAgentId = lobeAgentId?.trim();
+    Map<String, dynamic>? verifiedTopic;
+    if (conversationId != null &&
+        conversationId.isNotEmpty &&
         !conversationId.startsWith('local:')) {
       try {
         final topicResp = await _dio.get('/api/v1/topics/$conversationId');
@@ -837,59 +851,112 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
               ? Map<String, dynamic>.from(tData['data'] as Map)
               : Map<String, dynamic>.from(tData);
         }
-        final aId = topicObj?['agentId']?.toString();
-        if (aId != null && aId.isNotEmpty) {
-          resolvedAgentId = aId;
-        }
-      } on DioException catch (e) {
-        if (e.response?.statusCode != 404) {
-          throw SyncTerminalException(
-            statusCode: e.response?.statusCode ?? 500,
-            message: 'Failed to look up topic "$conversationId": ${e.message}',
+        if (topicObj == null ||
+            tData is! Map ||
+            tData['success'] == false ||
+            topicObj['id']?.toString() != conversationId) {
+          throw const SyncTerminalException(
+            statusCode: 400,
+            message: 'Topic lookup did not return the requested topic.',
           );
         }
+        verifiedTopic = topicObj;
+        final topicAgentId = topicObj['agentId']?.toString().trim();
+        if (resolvedAgentId != null &&
+            resolvedAgentId.isNotEmpty &&
+            resolvedAgentId != topicAgentId) {
+          throw SyncTerminalException(
+            statusCode: 400,
+            message:
+                'Local Agent "$resolvedAgentId" does not match topic Agent "$topicAgentId".',
+          );
+        }
+        resolvedAgentId = topicAgentId;
+      } on DioException catch (e) {
+        if (e.response?.statusCode == 404) {
+          throw SyncTerminalException(
+            statusCode: 404,
+            message: 'Topic "$conversationId" not found on server.',
+          );
+        }
+        rethrow;
       }
     }
 
     // 3. Pre-inference deduplication & Snapshot: query server messages BEFORE any inference POST
     List<Map<String, dynamic>> existingTopicMessages = const [];
+    Map<String, dynamic>? cachedAssistant;
     if (conversationId != null && !conversationId.startsWith('local:')) {
-      existingTopicMessages =
-          await fetchAllLobeHubMessages(_dio, topicId: conversationId);
-      for (final m in existingTopicMessages) {
+      existingTopicMessages = await fetchAllLobeHubMessages(
+        _dio,
+        topicId: conversationId,
+      );
+      final aliases = existingTopicMessages.where((m) {
         final role = m['role']?.toString();
         final meta = m['metadata'] is Map
             ? m['metadata'] as Map
             : (m['meta'] is Map ? m['meta'] as Map : null);
         final cid = meta?['conduitClientId']?.toString();
-        if ((cid == responseMessageId ||
+        return (cid == responseMessageId ||
                 m['id']?.toString() == responseMessageId) &&
-            role == 'assistant') {
-          // Pre-existing assistant alias found => NO inference POST!
-          final asstContent = m['content']?.toString() ?? '';
-          final asstReasoning = m['reasoning']?.toString();
-          return ChatCompletionSession.jsonCompletion(
-            messageId: responseMessageId,
-            sessionId: sessionId,
-            conversationId: conversationId,
-            jsonPayload: {
-              'id': responseMessageId,
-              'choices': [
-                {
-                  'index': 0,
-                  'message': {
-                    'role': 'assistant',
-                    'content': asstContent,
-                    if (asstReasoning != null && asstReasoning.isNotEmpty)
-                      'reasoning_content': asstReasoning,
-                  },
-                  'finish_reason': 'stop',
-                }
-              ],
-            },
+            role == 'assistant';
+      }).toList();
+      if (aliases.length > 1) {
+        throw const SyncTerminalException(
+          statusCode: 409,
+          message: 'Ambiguous: multiple assistant aliases match this turn.',
+        );
+      }
+      if (aliases.isNotEmpty) {
+        cachedAssistant = aliases.single;
+        if (cachedAssistant['error'] != null) {
+          throw SyncTerminalException(
+            statusCode: 500,
+            message: 'Persisted assistant failed: ${cachedAssistant['error']}',
+          );
+        }
+        if (!lobeHubAssistantResultComplete(cachedAssistant)) {
+          throw const SyncTerminalException(
+            statusCode: 409,
+            message: 'Assistant alias exists but has no completed result. Pull server state before retrying.',
           );
         }
       }
+    }
+
+    ChatCompletionSession cachedSession() {
+      final m = cachedAssistant!;
+      if (m['error'] != null) {
+        throw SyncTerminalException(
+          statusCode: 500,
+          message: 'Persisted assistant failed: ${m['error']}',
+        );
+      }
+      final asstContent = m['content']?.toString() ?? '';
+      final asstReasoning = (m['reasoning'] is Map
+          ? m['reasoning']['content']?.toString()
+          : m['reasoning']?.toString()) ?? m['reasoning_content']?.toString();
+      return ChatCompletionSession.jsonCompletion(
+        messageId: responseMessageId,
+        sessionId: sessionId,
+        conversationId: conversationId,
+        jsonPayload: {
+          'id': responseMessageId,
+          'choices': [
+            {
+              'index': 0,
+              'message': {
+                'role': 'assistant',
+                'content': asstContent,
+                if (asstReasoning != null && asstReasoning.isNotEmpty)
+                  'reasoning_content': asstReasoning,
+                if (m['tools'] is List) 'tool_calls': m['tools'],
+              },
+              'finish_reason': 'stop',
+            },
+          ],
+        },
+      );
     }
 
     // 4. Branch: Agent turn vs Ordinary model turn
@@ -899,52 +966,71 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
       try {
         final agentResp = await _dio.get('/api/v1/agents/$resolvedAgentId');
         final aData = agentResp.data;
-        if (aData is Map) {
+        if (aData is Map && aData['success'] != false) {
           agentObj = aData['data'] is Map
               ? Map<String, dynamic>.from(aData['data'] as Map)
               : Map<String, dynamic>.from(aData);
         }
-      } catch (e) {
-        throw SyncTerminalException(
-          statusCode: 400,
-          message: 'Agent "$resolvedAgentId" not found on server.',
-        );
+      } on DioException catch (e) {
+        if (e.response?.statusCode == 404) {
+          throw SyncTerminalException(
+            statusCode: 404,
+            message: 'Agent "$resolvedAgentId" not found on server.',
+          );
+        }
+        rethrow;
       }
-      if (agentObj == null) {
+      if (agentObj == null || agentObj['id']?.toString() != resolvedAgentId) {
         throw SyncTerminalException(
           statusCode: 400,
-          message: 'Agent "$resolvedAgentId" not found on server.',
+          message:
+              'Agent lookup did not return the requested Agent "$resolvedAgentId".',
         );
       }
 
-      final agentModel = agentObj['model']?.toString();
-      final agentProvider = agentObj['provider']?.toString();
+      final canUseTopicPin =
+          verifiedTopic?['groupId'] == null ||
+          verifiedTopic?['groupId'] == '' ||
+          verifiedTopic?['agentId'] == resolvedAgentId;
+      final topicModel = canUseTopicPin
+          ? (verifiedTopic?['model']?.toString())
+          : null;
+      final hasTopicPin = topicModel != null && topicModel.isNotEmpty;
+      final effectiveModel = hasTopicPin
+          ? topicModel
+          : agentObj['model']?.toString();
+      final topicProvider = verifiedTopic?['provider']?.toString();
+      final effectiveProvider =
+          hasTopicPin && topicProvider != null && topicProvider.isNotEmpty
+          ? topicProvider
+          : agentObj['provider']?.toString();
 
       // User chooses rawmodel in Agentconversation: MUST match configuredAgentmodel/provider or reject visible typed400
       if (model.isNotEmpty && model != resolvedAgentId) {
-        if (agentModel != null && agentModel.isNotEmpty && model != agentModel) {
+        if (model != effectiveModel) {
           throw SyncTerminalException(
             statusCode: 400,
             message:
-                'Requested model "$model" does not match configured agent model "$agentModel". LobeHub does not support per-turn model overrides on agents.',
+                'Requested model "$model" does not match effective Agent model "$effectiveModel" (verified topic pin or Agent default). Public Responses does not forward per-turn model overrides; an existing top-level topic pin is honored.',
           );
         }
       }
 
-      final reqProvider = modelItem?['provider']?.toString() ??
+      final reqProvider =
+          modelItem?['provider']?.toString() ??
           modelItem?['providerId']?.toString() ??
           modelItem?['metadata']?['provider']?.toString();
       if (reqProvider != null &&
-          agentProvider != null &&
           reqProvider.isNotEmpty &&
-          agentProvider.isNotEmpty &&
-          reqProvider != agentProvider) {
+          reqProvider != effectiveProvider) {
         throw SyncTerminalException(
           statusCode: 400,
           message:
-              'Requested provider "$reqProvider" does not match configured agent provider "$agentProvider".',
+              'Requested provider "$reqProvider" does not match effective Agent provider "$effectiveProvider" (verified topic pin or Agent default). Public Responses does not forward per-turn provider overrides.',
         );
       }
+
+      if (cachedAssistant != null) return cachedSession();
 
       // Snapshot server IDs before dispatch
       final snapshotServerIds = existingTopicMessages
@@ -952,11 +1038,13 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
           .where((id) => id.isNotEmpty)
           .toSet();
 
-      final userText = userMessage?['content']?.toString() ??
+      final userText =
+          userMessage?['content']?.toString() ??
           (messages.isNotEmpty && messages.last['role'] == 'user'
               ? (messages.last['content']?.toString() ?? '')
               : '');
-      final userLocalId = userMessage?['id']?.toString() ??
+      final userLocalId =
+          userMessage?['id']?.toString() ??
           (messages.isNotEmpty && messages.last['role'] == 'user'
               ? (messages.last['id']?.toString() ?? '')
               : const Uuid().v4());
@@ -993,8 +1081,6 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
         'stream': true,
         if (conversationId != null && !conversationId.startsWith('local:'))
           'previous_response_id': conversationId,
-        'agentId': resolvedAgentId,
-        'provider': ?agentProvider,
         'input': userText,
         if (instructions != null && instructions.isNotEmpty)
           'instructions': instructions,
@@ -1027,9 +1113,15 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
         byteStream,
         correlation: correlation,
         onStreamCompleted: () async {
-          if (conversationId != null &&
-              !conversationId.startsWith('local:')) {
-            await reconcileAgentTurn(correlation);
+          if (conversationId != null && !conversationId.startsWith('local:')) {
+            final result = await reconcileAgentTurn(correlation);
+            if (!result.success) {
+              throw SyncTerminalException(
+                statusCode: 500,
+                message:
+                    result.errorMessage ?? 'Agent turn reconciliation failed.',
+              );
+            }
           }
         },
       );
@@ -1044,7 +1136,8 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
     } else {
       // Ordinary model turn using /api/v1/chat
       String realModel = model;
-      String? realProvider = modelItem?['provider']?.toString() ??
+      String? realProvider =
+          modelItem?['provider']?.toString() ??
           modelItem?['providerId']?.toString() ??
           modelItem?['owned_by']?.toString() ??
           modelItem?['metadata']?['provider']?.toString();
@@ -1053,6 +1146,13 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
         realProvider = parts[0];
         realModel = parts.sublist(1).join('/');
       }
+      if (realModel.startsWith('agg_')) {
+        throw const SyncTerminalException(
+          statusCode: 400,
+          message: 'Agent group IDs cannot be used as inference models.',
+        );
+      }
+      if (cachedAssistant != null) return cachedSession();
 
       final cleanedMessages = <Map<String, dynamic>>[];
       for (final m in messages) {
@@ -1069,8 +1169,7 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
         'model': realModel,
         'provider': ?realProvider,
         'messages': cleanedMessages,
-        if (conversationId != null && !conversationId.startsWith('local:'))
-          'topicId': conversationId,
+        'stream': false,
       };
 
       final cancelToken = CancelToken();
@@ -1080,6 +1179,7 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
         '/api/v1/chat',
         data: chatPayload,
         options: Options(
+          responseType: ResponseType.plain,
           validateStatus: (s) => s != null && s < 600,
         ),
         cancelToken: cancelToken,
@@ -1100,26 +1200,33 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
       if (responseData is String) {
         try {
           responseData = jsonDecode(responseData);
-        } catch (_) {}
-      }
-      final dataMap =
-          responseData is Map ? responseData : <String, dynamic>{};
-      final innerData =
-          dataMap['data'] is Map ? (dataMap['data'] as Map) : dataMap;
-      String content = innerData['content']?.toString() ??
-          (innerData['message'] is Map
-              ? (innerData['message'] as Map)['content']?.toString()
-              : null) ??
-          '';
-      if (content.isEmpty &&
-          innerData['choices'] is List &&
-          (innerData['choices'] as List).isNotEmpty) {
-        final firstChoice = (innerData['choices'] as List).first;
-        if (firstChoice is Map && firstChoice['message'] is Map) {
-          content = (firstChoice['message'] as Map)['content']?.toString() ?? '';
+        } on FormatException {
+          throw const SyncTerminalException(
+            statusCode: 500,
+            message: 'Malformed LobeHub chat response.',
+          );
         }
       }
-      final reasoning = innerData['reasoning']?.toString() ??
+      if (responseData is! Map ||
+          responseData['success'] != true ||
+          responseData['data'] is! Map ||
+          !lobeHubAssistantResultComplete({
+            'done': true,
+            ...Map<String, dynamic>.from(responseData['data'] as Map),
+          }) ||
+          responseData['data']['error'] != null) {
+        throw SyncTerminalException(
+          statusCode: 500,
+          message:
+              'LobeHub chat did not return a successful result: $responseData',
+        );
+      }
+      final innerData = responseData['data'] as Map;
+      final content = innerData['content']?.toString() ?? '';
+      final reasoning =
+          (innerData['reasoning'] is Map
+              ? innerData['reasoning']['content']?.toString()
+              : innerData['reasoning']?.toString()) ??
           innerData['reasoning_content']?.toString();
       final usage = innerData['usage'] is Map
           ? Map<String, dynamic>.from(innerData['usage'] as Map)
@@ -1127,47 +1234,113 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
 
       // Persist assistant and user if needed before returning JSON session
       if (conversationId != null && !conversationId.startsWith('local:')) {
-        final existingClientIds = <String>{};
+        String? validServerId(dynamic value) =>
+            value is String &&
+                value.isNotEmpty &&
+                value.trim() == value &&
+                !value.startsWith('local:')
+            ? value
+            : null;
+
+        Future<String> createMessage(Map<String, dynamic> payload) async {
+          final acknowledgement = await _dio.post(
+            '/api/v1/messages',
+            data: payload,
+            options: Options(validateStatus: (s) => s != null && s < 600),
+          );
+          final status = acknowledgement.statusCode ?? 0;
+          final body = acknowledgement.data;
+          final message = body is Map && body['data'] is Map
+              ? body['data'] as Map
+              : body;
+          final id = message is Map ? validServerId(message['id']) : null;
+          if (status < 200 ||
+              status >= 300 ||
+              body is! Map ||
+              body['success'] == false ||
+              (body.containsKey('data') && body['success'] != true) ||
+              body['error'] != null ||
+              (message is Map && message['error'] != null) ||
+              id == null) {
+            throw SyncTerminalException(
+              statusCode: status >= 400 ? status : 500,
+              message:
+                  'LobeHub message persistence was not acknowledged: $body',
+            );
+          }
+          return id;
+        }
+
+        final serverIdsByClientId = <String, String>{};
+        final snapshotServerIds = <String>{};
         for (final em in existingTopicMessages) {
+          final serverId = validServerId(em['id']);
+          if (serverId != null) snapshotServerIds.add(serverId);
           final meta = em['metadata'] is Map
               ? em['metadata'] as Map
               : (em['meta'] is Map ? em['meta'] as Map : null);
           final cid = meta?['conduitClientId']?.toString();
-          if (cid != null && cid.isNotEmpty) existingClientIds.add(cid);
-        }
-
-        if (userMessage != null) {
-          final uId = userMessage['id']?.toString();
-          final uContent = userMessage['content']?.toString() ?? '';
-          if (uId != null &&
-              uId.isNotEmpty &&
-              uContent.isNotEmpty &&
-              !existingClientIds.contains(uId)) {
-            await _dio.post(
-              '/api/v1/messages',
-              data: {
-                'role': 'user',
-                'content': uContent,
-                'topicId': conversationId,
-                'metadata': {'conduitClientId': uId},
-              },
-            );
+          if (cid != null && cid.isNotEmpty && serverId != null) {
+            serverIdsByClientId[cid] = serverId;
           }
         }
 
-        await _dio.post(
-          '/api/v1/messages',
-          data: {
-            'role': 'assistant',
-            'content': content,
+        final uId = userMessage?['id']?.toString();
+        final uContent = userMessage?['content']?.toString() ?? '';
+        if (uId == null || uId.isEmpty || uContent.isEmpty) {
+          throw const SyncTerminalException(
+            statusCode: 400,
+            message:
+                'Raw LobeHub persistence requires an identified user message.',
+          );
+        }
+        final matchingUsers = existingTopicMessages.where((em) {
+          final meta = em['metadata'] is Map
+              ? em['metadata'] as Map
+              : (em['meta'] is Map ? em['meta'] as Map : null);
+          return em['role'] == 'user' &&
+              (meta?['conduitClientId'] == uId || em['id'] == uId);
+        }).toList();
+        String serverUserId;
+        if (matchingUsers.isNotEmpty) {
+          final id = validServerId(matchingUsers.first['id']);
+          if (matchingUsers.length != 1 || id == null) {
+            throw const SyncTerminalException(
+              statusCode: 409,
+              message: 'User alias has no unambiguous server message ID.',
+            );
+          }
+          serverUserId = id;
+        } else {
+          final parentAlias = userMessage?['parentId']?.toString();
+          final serverParentId =
+              serverIdsByClientId[parentAlias] ??
+              (snapshotServerIds.contains(parentAlias) ? parentAlias : null);
+          serverUserId = await createMessage({
+            'role': 'user',
+            'content': uContent,
             'topicId': conversationId,
-            'model': realModel,
-            'provider': ?realProvider,
-            if (reasoning != null && reasoning.isNotEmpty)
-              'reasoning': reasoning,
-            'metadata': {'conduitClientId': responseMessageId},
-          },
-        );
+            'parentId': ?serverParentId,
+            'metadata': {
+              if (userMessage?['metadata'] is Map)
+                ...Map<String, dynamic>.from(userMessage!['metadata'] as Map)
+              else if (userMessage?['meta'] is Map)
+                ...Map<String, dynamic>.from(userMessage!['meta'] as Map),
+              'conduitClientId': uId,
+            },
+          });
+        }
+
+        await createMessage({
+          'role': 'assistant',
+          'content': content,
+          'topicId': conversationId,
+          'parentId': serverUserId,
+          'model': realModel,
+          'provider': ?realProvider,
+          if (reasoning != null && reasoning.isNotEmpty) 'reasoning': reasoning,
+          'metadata': {'conduitClientId': responseMessageId},
+        });
       }
 
       final jsonChoices = <String, dynamic>{
@@ -1178,11 +1351,12 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
             'message': {
               'role': 'assistant',
               'content': content,
+              if (innerData['tools'] is List) 'tool_calls': innerData['tools'],
               if (reasoning != null && reasoning.isNotEmpty)
                 'reasoning_content': reasoning,
             },
             'finish_reason': 'stop',
-          }
+          },
         ],
         'usage': ?usage,
       };
@@ -1204,89 +1378,62 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
     final scanner = SseFrameScanner();
     final textStream = byteStream.cast<List<int>>().transform(utf8.decoder);
 
-    bool failureDetected = false;
-    String? failureMessage;
     bool completedHandled = false;
 
-    await for (final chunk in textStream) {
-      for (final frame in scanner.addChunk(chunk)) {
-        final trimmed = frame.data.trim();
-        final eventType = frame.event?.trim().toLowerCase();
-
-        // Check for response.completed with status: failed
-        if (eventType == 'response.completed' ||
-            eventType == 'response.failed' ||
-            trimmed.contains('"status":"failed"') ||
-            trimmed.contains('"status": "failed"')) {
-          try {
-            final decoded = jsonDecode(trimmed);
-            if (decoded is Map) {
-              final status = decoded['status']?.toString() ??
-                  (decoded['response'] is Map
-                      ? (decoded['response'] as Map)['status']?.toString()
-                      : null);
-              if (status == 'failed') {
-                failureDetected = true;
-                failureMessage = decoded['error']?.toString() ??
-                    (decoded['response'] is Map
-                        ? (decoded['response'] as Map)['error']?.toString()
-                        : 'Response completed with status failed');
-              }
-            }
-          } catch (_) {}
-        }
-
-        if (failureDetected) {
-          throw SyncTerminalException(
+    Future<List<int>> processFrame(SseFrame frame) async {
+      final trimmed = frame.data.trim();
+      if (trimmed == '[DONE]') {
+        if (!completedHandled) {
+          throw const SyncTerminalException(
             statusCode: 500,
-            message: failureMessage ??
-                'LobeHub response completed with status: failed',
+            message: 'Responses stream ended without authoritative completion.',
           );
         }
-
-        final isDoneFrame = trimmed == '[DONE]' ||
-            eventType == 'response.completed' ||
-            eventType == 'done' ||
-            eventType == 'stop';
-
-        if (isDoneFrame && !completedHandled) {
-          completedHandled = true;
-          try {
-            await onStreamCompleted();
-          } catch (e) {
-            _traceApi('onStreamCompleted error: $e');
-          }
-        }
-
-        final buffer = StringBuffer();
-        if (frame.event != null) {
-          buffer.writeln('event: ${frame.event}');
-        }
-        for (final line in frame.data.split('\n')) {
-          buffer.writeln('data: $line');
-        }
-        buffer.writeln();
-        yield utf8.encode(buffer.toString());
+        return utf8.encode('data: [DONE]\n\n');
       }
-    }
-
-    for (final frame in scanner.close()) {
-      final trimmed = frame.data.trim();
-      final eventType = frame.event?.trim().toLowerCase();
-      final isDoneFrame = trimmed == '[DONE]' ||
-          eventType == 'response.completed' ||
-          eventType == 'done' ||
-          eventType == 'stop';
-
-      if (isDoneFrame && !completedHandled) {
+      dynamic decoded;
+      try {
+        decoded = jsonDecode(trimmed);
+      } on FormatException {
+        throw const SyncTerminalException(
+          statusCode: 500,
+          message: 'Malformed Responses stream event.',
+        );
+      }
+      if (decoded is! Map) {
+        throw const SyncTerminalException(
+          statusCode: 500,
+          message: 'Responses stream event must be an object.',
+        );
+      }
+      final eventType = frame.event ?? decoded['type'];
+      final response = decoded['response'] is Map
+          ? decoded['response'] as Map
+          : decoded;
+      if (eventType == 'response.failed' ||
+          eventType == 'response.incomplete' ||
+          response['status'] == 'failed' ||
+          response['status'] == 'incomplete' ||
+          decoded['success'] == false ||
+          response['error'] != null) {
+        throw SyncTerminalException(
+          statusCode: 500,
+          message:
+              'LobeHub Responses failed: ${response['error'] ?? response['incomplete_details'] ?? eventType}',
+        );
+      }
+      if (eventType == 'response.completed') {
+        if (response['status'] != 'completed' ||
+            !_hasLobeResponseOutput(response)) {
+          throw const SyncTerminalException(
+            statusCode: 500,
+            message:
+                'Responses completion has no authoritative completed result.',
+          );
+        }
+        await onStreamCompleted();
         completedHandled = true;
-        try {
-          await onStreamCompleted();
-        } catch (e) {
-          _traceApi('onStreamCompleted error: $e');
-        }
       }
-
       final buffer = StringBuffer();
       if (frame.event != null) {
         buffer.writeln('event: ${frame.event}');
@@ -1295,16 +1442,53 @@ mixin _ChatCompletionsApi on _ApiServiceBase {
         buffer.writeln('data: $line');
       }
       buffer.writeln();
-      yield utf8.encode(buffer.toString());
+      return utf8.encode(buffer.toString());
     }
 
-    if (!completedHandled) {
-      completedHandled = true;
-      try {
-        await onStreamCompleted();
-      } catch (e) {
-        _traceApi('onStreamCompleted error: $e');
+    await for (final chunk in textStream) {
+      for (final frame in scanner.addChunk(chunk)) {
+        yield await processFrame(frame);
       }
     }
+    for (final frame in scanner.close()) {
+      yield await processFrame(frame);
+    }
+    if (!completedHandled) {
+      throw const SyncTerminalException(
+        statusCode: 500,
+        message: 'Responses stream closed before authoritative completion. Pull server state before retrying.',
+      );
+    }
+  }
+
+  bool _hasLobeResponseOutput(Map response) {
+    if (response['output_text'] is String &&
+        (response['output_text'] as String).trim().isNotEmpty) {
+      return true;
+    }
+    final output = response['output'];
+    if (output is! List) return false;
+    return output.any((item) {
+      if (item is! Map || item['status'] == 'in_progress') return false;
+      if (item['type'] == 'function_call') {
+        return item['name'] is String &&
+            (item['name'] as String).isNotEmpty &&
+            item['arguments'] is String;
+      }
+      if (item['type'] == 'function_call_output') {
+        return item['output'] is String;
+      }
+      final parts = item['type'] == 'reasoning'
+          ? item['reasoning_summary'] ?? item['summary']
+          : item['content'];
+      if (parts is String) return parts.trim().isNotEmpty;
+      return parts is List &&
+          parts.any(
+            (part) =>
+                part is Map &&
+                part['text'] is String &&
+                (part['text'] as String).trim().isNotEmpty,
+          );
+    });
   }
 }

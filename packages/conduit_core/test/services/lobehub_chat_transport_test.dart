@@ -28,6 +28,23 @@ void main() {
       );
       lobeApi.dio.httpClientAdapter = adapter;
       lobeApi.dio.interceptors.clear();
+      for (final topic in <String, String?>{
+        'tpc_100': null,
+        'tpc_agent_chat': 'agt_coder',
+        'tpc_snapshot_fault': 'agt_coder',
+        'tpc_persist_fault': null,
+        'tpc_existing_alias': null,
+        'tpc_fail': 'agt_fail',
+      }.entries) {
+        adapter.registerHandler(
+          method: 'GET',
+          path: '/api/v1/topics/${topic.key}',
+          handler: (_) => _jsonResponse({
+            'success': true,
+            'data': {'id': topic.key, 'agentId': topic.value},
+          }),
+        );
+      }
     });
 
     test('Rejects multipart/file inference with typed SyncTerminalException 400 before inference POST', () async {
@@ -35,11 +52,11 @@ void main() {
       await check(
         lobeApi.sendMessageSession(
           messages: [
-            {'role': 'user', 'content': 'Hello'}
+            {'role': 'user', 'content': 'Hello'},
           ],
           model: 'gpt-4o',
           files: [
-            {'id': 'f1', 'name': 'pic.png'}
+            {'id': 'f1', 'name': 'pic.png'},
           ],
         ),
       ).throws<SyncTerminalException>();
@@ -48,7 +65,7 @@ void main() {
       await check(
         lobeApi.sendMessageSession(
           messages: [
-            {'role': 'user', 'content': 'Hello'}
+            {'role': 'user', 'content': 'Hello'},
           ],
           model: 'gpt-4o',
           userMessage: {
@@ -67,7 +84,7 @@ void main() {
               'role': 'user',
               'content': 'Hello',
               'attachment_ids': ['att_1'],
-            }
+            },
           ],
           model: 'gpt-4o',
         ),
@@ -85,7 +102,8 @@ void main() {
           final body = options.data as Map<String, dynamic>;
           check(body['model']).equals('claude-3-5-sonnet');
           check(body['provider']).equals('anthropic');
-          check(body['topicId']).equals('tpc_100');
+          check(body.containsKey('topicId')).isFalse();
+          check(body['stream']).equals(false);
 
           final msgs = body['messages'] as List;
           // Empty placeholder messages must be skipped
@@ -110,7 +128,7 @@ void main() {
         method: 'GET',
         path: '/api/v1/messages',
         handler: (_) => _jsonResponse({
-          'data': {'messages': []}
+          'data': {'messages': []},
         }),
       );
 
@@ -145,12 +163,227 @@ void main() {
       final msg = choices[0]['message'] as Map;
       check(msg['role']).equals('assistant');
       check(msg['content']).equals('Dart is a modern language.');
-      check(msg['reasoning_content']).equals('Thinking about Dart architecture...');
+      check(msg['reasoning_content'])
+          .equals('Thinking about Dart architecture...');
       check(session.jsonPayload!['usage']?['total_tokens']).equals(42);
 
       // Verify POST /api/v1/chat was called
       check(adapter.requestedPaths).contains('/api/v1/chat');
     });
+
+    for (final existing in [false, true]) {
+      for (final wrapped in [false, true]) {
+        test(
+          'raw assistant uses verified server parent existing=$existing wrapped=$wrapped',
+          () async {
+            adapter.registerHandler(
+              method: 'GET',
+              path: '/api/v1/messages',
+              handler: (_) => _jsonResponse({
+                'data': {
+                  'messages': [
+                    {
+                      'id': 'server-older',
+                      'role': 'assistant',
+                      'metadata': {'conduitClientId': 'older-local'},
+                    },
+                    if (existing)
+                      {
+                        'id': 'server-user',
+                        'role': 'user',
+                        'metadata': {'conduitClientId': 'user-local'},
+                      },
+                  ],
+                },
+              }),
+            );
+            adapter.registerHandler(
+              method: 'POST',
+              path: '/api/v1/chat',
+              handler: (_) => _jsonResponse({
+                'success': true,
+                'data': {'content': 'Reply'},
+              }),
+            );
+            final writes = <Map<String, dynamic>>[];
+            adapter.registerHandler(
+              method: 'POST',
+              path: '/api/v1/messages',
+              handler: (options) {
+                final body = options.data as Map<String, dynamic>;
+                writes.add(body);
+                if (body['role'] == 'user') {
+                  expect(body['parentId'], 'server-older');
+                  expect(body['metadata'], {
+                    'retained': true,
+                    'conduitClientId': 'user-local',
+                  });
+                } else {
+                  expect(body['parentId'], 'server-user');
+                  expect(
+                    body['metadata']['conduitClientId'],
+                    'assistant-local',
+                  );
+                }
+                final data = {
+                  'id': body['role'] == 'user'
+                      ? 'server-user'
+                      : 'server-assistant',
+                };
+                return _jsonResponse(
+                  wrapped ? {'success': true, 'data': data} : data,
+                );
+              },
+            );
+            await lobeApi.sendMessageSession(
+              messages: const [
+                {'role': 'user', 'content': 'Prompt'},
+              ],
+              model: 'gpt-4o',
+              conversationId: 'tpc_100',
+              responseMessageId: 'assistant-local',
+              userMessage: const {
+                'id': 'user-local',
+                'content': 'Prompt',
+                'parentId': 'older-local',
+                'metadata': {'retained': true},
+              },
+            );
+            expect(writes.length, existing ? 1 : 2);
+            expect(
+              adapter.requests.where((r) => r.path == '/api/v1/chat').length,
+              1,
+            );
+          },
+        );
+      }
+    }
+
+    test(
+      'raw existing user alias without a server ID is not recreated',
+      () async {
+        adapter.registerHandler(
+          method: 'GET',
+          path: '/api/v1/messages',
+          handler: (_) => _jsonResponse({
+            'data': {
+              'messages': [
+                {
+                  'role': 'user',
+                  'metadata': {'conduitClientId': 'user-local'},
+                },
+              ],
+            },
+          }),
+        );
+        adapter.registerHandler(
+          method: 'POST',
+          path: '/api/v1/chat',
+          handler: (_) => _jsonResponse({
+            'success': true,
+            'data': {'content': 'Reply'},
+          }),
+        );
+        await expectLater(
+          lobeApi.sendMessageSession(
+            messages: const [
+              {'role': 'user', 'content': 'Prompt'},
+            ],
+            model: 'gpt-4o',
+            conversationId: 'tpc_100',
+            userMessage: const {'id': 'user-local', 'content': 'Prompt'},
+          ),
+          throwsA(isA<SyncTerminalException>()),
+        );
+        expect(
+          adapter.requests.where(
+            (r) => r.method == 'POST' && r.path == '/api/v1/messages',
+          ),
+          isEmpty,
+        );
+      },
+    );
+
+    for (final role in ['user', 'assistant']) {
+      for (final acknowledgement in <Object?>[
+        null,
+        {},
+        {
+          'success': false,
+          'data': {'id': 'server-message'},
+        },
+        {
+          'success': true,
+          'data': {'id': ''},
+        },
+        {
+          'success': true,
+          'data': {'id': 42},
+        },
+        {
+          'success': true,
+          'data': {'id': 'local:fake'},
+        },
+        {
+          'success': true,
+          'data': {'id': '   '},
+        },
+      ]) {
+        test(
+          'raw $role requires valid persistence acknowledgement $acknowledgement',
+          () async {
+            adapter.registerHandler(
+              method: 'GET',
+              path: '/api/v1/messages',
+              handler: (_) => _jsonResponse({
+                'data': {'messages': []},
+              }),
+            );
+            adapter.registerHandler(
+              method: 'POST',
+              path: '/api/v1/chat',
+              handler: (_) => _jsonResponse({
+                'success': true,
+                'data': {'content': 'Reply'},
+              }),
+            );
+            adapter.registerHandler(
+              method: 'POST',
+              path: '/api/v1/messages',
+              handler: (options) => _jsonResponse(
+                (options.data as Map)['role'] == role
+                    ? acknowledgement
+                    : {
+                        'success': true,
+                        'data': {'id': 'server-user'},
+                      },
+              ),
+            );
+            await expectLater(
+              lobeApi.sendMessageSession(
+                messages: const [
+                  {'role': 'user', 'content': 'Prompt'},
+                ],
+                model: 'gpt-4o',
+                conversationId: 'tpc_100',
+                userMessage: const {'id': 'user-local', 'content': 'Prompt'},
+              ),
+              throwsA(isA<SyncTerminalException>()),
+            );
+            if (role == 'user') {
+              expect(
+                adapter.requests
+                    .where(
+                      (r) => r.path == '/api/v1/messages' && r.method == 'POST',
+                    )
+                    .length,
+                1,
+              );
+            }
+          },
+        );
+      }
+    }
 
     test('Agent turn with explicit lobeAgentId uses POST /api/v1/responses with exactAgentID notLLM and string input', () async {
       adapter.registerHandler(
@@ -161,7 +394,7 @@ void main() {
             'id': 'agt_coder',
             'model': 'gpt-4o', // Underlying LLM
             'provider': 'openai',
-          }
+          },
         }),
       );
 
@@ -176,9 +409,9 @@ void main() {
                 'role': 'user',
                 'content': 'initial prompt',
                 'metadata': {'conduitClientId': 'c_init'},
-              }
-            ]
-          }
+              },
+            ],
+          },
         }),
       );
 
@@ -190,17 +423,16 @@ void main() {
           // Server-contract regression assertion: exactAgentID, NOT underlying LLM!
           check(data['model']).equals('agt_coder');
           check(data['model']).not((m) => m.equals('gpt-4o'));
-          check(data['agentId']).equals('agt_coder');
-          check(data['provider']).equals('openai');
+          check(data.containsKey('agentId')).isFalse();
+          check(data.containsKey('provider')).isFalse();
           check(data['previous_response_id']).equals('tpc_agent_chat');
           // input must be current user text string per contract
           check(data['input']).equals('Write some code');
           check(data['instructions']).equals('You are an expert coder');
 
           return _sseResponse([
-            'event: text.delta\ndata: {"delta":{"content":"Sure, "}}\n\n',
-            'event: text.delta\ndata: {"delta":{"content":"here is code."}}\n\n',
-            'data: [DONE]\n\n',
+            'event: response.output_text.delta\ndata: {"delta":"Sure, here is code."}\n\n',
+            'event: response.completed\ndata: {"response":{"status":"completed","output_text":"Sure, here is code."}}\n\n',
           ]);
         },
       );
@@ -221,7 +453,7 @@ void main() {
       final session = await lobeApi.sendMessageSession(
         messages: [
           {'role': 'system', 'content': 'You are an expert coder'},
-          {'role': 'user', 'content': 'Write some code'}
+          {'role': 'user', 'content': 'Write some code'},
         ],
         model: 'gpt-4o',
         conversationId: 'tpc_agent_chat',
@@ -243,8 +475,37 @@ void main() {
       check(preDispatchCorrelation!.userText).equals('Write some code');
       check(preDispatchCorrelation!.userLocalId).equals('user_local_id');
       check(preDispatchCorrelation!.assistantLocalId).equals('asst_local_id');
-      check(preDispatchCorrelation!.snapshotServerIds.contains('srv_msg_init')).isTrue();
+      check(preDispatchCorrelation!.snapshotServerIds.contains('srv_msg_init'))
+          .isTrue();
 
+      adapter.registerHandler(
+        method: 'GET',
+        path: '/api/v1/messages',
+        handler: (_) => _jsonResponse({
+          'data': {
+            'messages': [
+              {
+                'id': 'srv_msg_init',
+                'role': 'user',
+                'content': 'initial prompt',
+              },
+              {
+                'id': 'srv_user_2',
+                'role': 'user',
+                'content': 'Write some code',
+              },
+              {
+                'id': 'srv_asst_2',
+                'role': 'assistant',
+                'content': 'Sure, here is code.',
+                'parentId': 'srv_user_2',
+                'model': 'gpt-4o',
+                'provider': 'openai',
+              },
+            ],
+          },
+        }),
+      );
       // Read stream
       final events = <String>[];
       await for (final chunk in session.byteStream!) {
@@ -256,20 +517,23 @@ void main() {
     test('Agent turn rejects raw model mismatch with typed SyncTerminalException 400', () async {
       adapter.registerHandler(
         method: 'GET',
+        path: '/api/v1/messages',
+        handler: (_) => _jsonResponse({
+          'data': {'messages': []},
+        }),
+      );
+      adapter.registerHandler(
+        method: 'GET',
         path: '/api/v1/agents/agt_coder',
         handler: (_) => _jsonResponse({
-          'data': {
-            'id': 'agt_coder',
-            'model': 'gpt-4o',
-            'provider': 'openai',
-          }
+          'data': {'id': 'agt_coder', 'model': 'gpt-4o', 'provider': 'openai'},
         }),
       );
 
       await check(
         lobeApi.sendMessageSession(
           messages: [
-            {'role': 'user', 'content': 'Hello'}
+            {'role': 'user', 'content': 'Hello'},
           ],
           model: 'claude-3-opus', // does NOT match configured gpt-4o
           conversationId: 'tpc_agent_chat',
@@ -277,6 +541,171 @@ void main() {
         ),
       ).throws<SyncTerminalException>();
     });
+
+    for (final path in [
+      '/api/v1/topics/tpc_agent_chat',
+      '/api/v1/agents/agt_coder',
+    ]) {
+      for (final type in [
+        DioExceptionType.connectionTimeout,
+        DioExceptionType.receiveTimeout,
+        DioExceptionType.connectionError,
+      ]) {
+        test('preflight preserves $type from $path without dispatch', () async {
+          adapter.registerHandler(
+            method: 'GET',
+            path: '/api/v1/messages',
+            handler: (_) => _jsonResponse({
+              'data': {'messages': []},
+            }),
+          );
+          DioException? failure;
+          adapter.registerHandler(
+            method: 'GET',
+            path: path,
+            handler: (options) {
+              failure = DioException(requestOptions: options, type: type);
+              throw failure!;
+            },
+          );
+          await expectLater(
+            lobeApi.sendMessageSession(
+              messages: const [
+                {'role': 'user', 'content': 'Hello'},
+              ],
+              model: 'gpt-4o',
+              conversationId: 'tpc_agent_chat',
+              lobeAgentId: 'agt_coder',
+            ),
+            throwsA(isA<DioException>().having((e) => e.type, 'type', type)),
+          );
+          expect(failure, isNotNull);
+          expect(adapter.requests.where((r) => r.method == 'POST'), isEmpty);
+        });
+      }
+      for (final status in [404, 500, 503]) {
+        test(
+          'preflight classifies HTTP $status from $path without dispatch',
+          () async {
+            adapter.registerHandler(
+              method: 'GET',
+              path: '/api/v1/messages',
+              handler: (_) => _jsonResponse({
+                'data': {'messages': []},
+              }),
+            );
+            adapter.registerHandler(
+              method: 'GET',
+              path: path,
+              handler: (_) =>
+                  _jsonResponse({'error': 'Lookup failed'}, statusCode: status),
+            );
+            await expectLater(
+              lobeApi.sendMessageSession(
+                messages: const [
+                  {'role': 'user', 'content': 'Hello'},
+                ],
+                model: 'gpt-4o',
+                conversationId: 'tpc_agent_chat',
+                lobeAgentId: 'agt_coder',
+              ),
+              throwsA(
+                status == 404
+                    ? isA<SyncTerminalException>().having(
+                        (e) => e.statusCode,
+                        'status',
+                        404,
+                      )
+                    : isA<DioException>().having(
+                        (e) => e.response?.statusCode,
+                        'status',
+                        status,
+                      ),
+              ),
+            );
+            expect(adapter.requests.where((r) => r.method == 'POST'), isEmpty);
+          },
+        );
+      }
+    }
+
+    test(
+      'unbound Agent cannot use an unverified global model override',
+      () async {
+        adapter.registerHandler(
+          method: 'GET',
+          path: '/api/v1/agents/agt_coder',
+          handler: (_) => _jsonResponse({
+            'data': {
+              'id': 'agt_coder',
+              'model': 'gpt-4o',
+              'provider': 'openai',
+            },
+          }),
+        );
+        await expectLater(
+          lobeApi.sendMessageSession(
+            messages: const [
+              {'role': 'user', 'content': 'Hello'},
+            ],
+            model: 'claude-topic',
+            modelItem: const {
+              'provider': 'anthropic',
+              'metadata': {'model': 'claude-topic'},
+            },
+            lobeAgentId: 'agt_coder',
+          ),
+          throwsA(isA<SyncTerminalException>()),
+        );
+        expect(adapter.requests.where((r) => r.method == 'POST'), isEmpty);
+      },
+    );
+
+    for (final lookup in ['topics/tpc_agent_chat', 'agents/agt_coder']) {
+      test(
+        'mismatched authoritative ID rejects $lookup before dispatch',
+        () async {
+          adapter.registerHandler(
+            method: 'GET',
+            path: '/api/v1/messages',
+            handler: (_) => _jsonResponse({
+              'data': {'messages': []},
+            }),
+          );
+          adapter.registerHandler(
+            method: 'GET',
+            path: '/api/v1/$lookup',
+            handler: (_) => _jsonResponse({
+              'success': true,
+              'data': {
+                'id': 'wrong-id',
+                'agentId': 'agt_coder',
+                'model': 'gpt-4o',
+                'provider': 'openai',
+              },
+            }),
+          );
+          await expectLater(
+            lobeApi.sendMessageSession(
+              messages: const [
+                {'role': 'user', 'content': 'Hello'},
+              ],
+              model: 'gpt-4o',
+              conversationId: 'tpc_agent_chat',
+              lobeAgentId: 'agt_coder',
+            ),
+            throwsA(
+              isA<SyncTerminalException>().having(
+                (e) => e.message,
+                'message',
+                contains('lookup did not return the requested'),
+              ),
+            ),
+          );
+          expect(adapter.requests.where((r) => r.method == 'POST'), isEmpty);
+        },
+      );
+    }
 
     test('Derives verified Agent from actual topic when lobeAgentId is not provided', () async {
       adapter.registerHandler(
@@ -287,7 +716,7 @@ void main() {
             'id': 'tpc_agent_derived',
             'agentId': 'agt_auto_verified',
             'title': 'Agent Chat',
-          }
+          },
         }),
       );
 
@@ -299,7 +728,7 @@ void main() {
             'id': 'agt_auto_verified',
             'model': 'gpt-4o',
             'provider': 'openai',
-          }
+          },
         }),
       );
 
@@ -307,7 +736,7 @@ void main() {
         method: 'GET',
         path: '/api/v1/messages',
         handler: (_) => _jsonResponse({
-          'data': {'messages': []}
+          'data': {'messages': []},
         }),
       );
 
@@ -316,18 +745,20 @@ void main() {
         path: '/api/v1/responses',
         handler: (options) {
           final data = options.data as Map<String, dynamic>;
-          check(data['agentId']).equals('agt_auto_verified');
+          check(data.containsKey('agentId')).isFalse();
           check(data['model']).equals('agt_auto_verified');
           check(data['model']).not((m) => m.equals('gpt-4o'));
           check(data['input']).equals('Hello Agent');
           check(data['previous_response_id']).equals('tpc_agent_derived');
-          return _sseResponse(['data: [DONE]\n\n']);
+          return _sseResponse([
+            'event: response.completed\ndata: {"response":{"status":"completed","output_text":"Hello"}}\n\n',
+          ]);
         },
       );
 
       final session = await lobeApi.sendMessageSession(
         messages: [
-          {'role': 'user', 'content': 'Hello Agent'}
+          {'role': 'user', 'content': 'Hello Agent'},
         ],
         model: 'gpt-4o',
         conversationId: 'tpc_agent_derived',
@@ -337,51 +768,53 @@ void main() {
       check(adapter.requestedPaths).contains('/api/v1/responses');
     });
 
-    test('HTTP fault test: snapshot error => zero POST to /api/v1/responses', () async {
-      adapter.registerHandler(
-        method: 'GET',
-        path: '/api/v1/agents/agt_coder',
-        handler: (_) => _jsonResponse({
-          'data': {
-            'id': 'agt_coder',
-            'model': 'gpt-4o',
-            'provider': 'openai',
-          }
-        }),
-      );
+    test(
+      'HTTP fault test: snapshot error => zero POST to /api/v1/responses',
+      () async {
+        adapter.registerHandler(
+          method: 'GET',
+          path: '/api/v1/agents/agt_coder',
+          handler: (_) => _jsonResponse({
+            'data': {
+              'id': 'agt_coder',
+              'model': 'gpt-4o',
+              'provider': 'openai',
+            },
+          }),
+        );
 
-      // Snapshot endpoint fails with 500 error
-      adapter.registerHandler(
-        method: 'GET',
-        path: '/api/v1/messages',
-        handler: (_) => _jsonResponse(
-          {'error': 'Internal database failure'},
-          statusCode: 500,
-        ),
-      );
+        // Snapshot endpoint fails with 500 error
+        adapter.registerHandler(
+          method: 'GET',
+          path: '/api/v1/messages',
+          handler: (_) => _jsonResponse({
+            'error': 'Internal database failure',
+          }, statusCode: 500),
+        );
 
-      // Must throw and MUST NOT execute POST /api/v1/responses
-      await check(
-        lobeApi.sendMessageSession(
-          messages: [
-            {'role': 'user', 'content': 'Hello'}
-          ],
-          model: 'gpt-4o',
-          conversationId: 'tpc_snapshot_fault',
-          lobeAgentId: 'agt_coder',
-        ),
-      ).throws<DioException>();
+        // Must throw and MUST NOT execute POST /api/v1/responses
+        await check(
+          lobeApi.sendMessageSession(
+            messages: [
+              {'role': 'user', 'content': 'Hello'},
+            ],
+            model: 'gpt-4o',
+            conversationId: 'tpc_snapshot_fault',
+            lobeAgentId: 'agt_coder',
+          ),
+        ).throws<DioException>();
 
-      // Assert zero POST to /api/v1/responses
-      check(adapter.requestedPaths.contains('/api/v1/responses')).isFalse();
-    });
+        // Assert zero POST to /api/v1/responses
+        check(adapter.requestedPaths.contains('/api/v1/responses')).isFalse();
+      },
+    );
 
     test('HTTP fault test: raw persist failure => no json success', () async {
       adapter.registerHandler(
         method: 'GET',
         path: '/api/v1/messages',
         handler: (_) => _jsonResponse({
-          'data': {'messages': []}
+          'data': {'messages': []},
         }),
       );
 
@@ -398,75 +831,77 @@ void main() {
       adapter.registerHandler(
         method: 'POST',
         path: '/api/v1/messages',
-        handler: (_) => _jsonResponse(
-          {'error': 'Failed to save message'},
-          statusCode: 500,
-        ),
+        handler: (_) =>
+            _jsonResponse({'error': 'Failed to save message'}, statusCode: 500),
       );
 
       // Must throw and NOT return jsonCompletion success
       await check(
         lobeApi.sendMessageSession(
           messages: [
-            {'role': 'user', 'content': 'Test persist failure'}
+            {'role': 'user', 'content': 'Test persist failure'},
           ],
           model: 'gpt-4o',
           conversationId: 'tpc_persist_fault',
           responseMessageId: 'resp_fault_1',
+          userMessage: {'id': 'user_fault', 'content': 'Test persist failure'},
         ),
-      ).throws<DioException>();
+      ).throws<SyncTerminalException>();
     });
 
-    test('HTTP fault test: preexisting assistant alias => no inference POST', () async {
-      // Server already contains assistant message with conduitClientId = resp_existing_alias
-      adapter.registerHandler(
-        method: 'GET',
-        path: '/api/v1/messages',
-        handler: (_) => _jsonResponse({
-          'data': {
-            'messages': [
-              {
-                'id': 'srv_asst_cached',
-                'role': 'assistant',
-                'content': 'Already generated cached content',
-                'reasoning': 'Already reasoned',
-                'metadata': {'conduitClientId': 'resp_existing_alias'},
-              }
-            ]
-          }
-        }),
-      );
+    test(
+      'HTTP fault test: preexisting assistant alias => no inference POST',
+      () async {
+        // Server already contains assistant message with conduitClientId = resp_existing_alias
+        adapter.registerHandler(
+          method: 'GET',
+          path: '/api/v1/messages',
+          handler: (_) => _jsonResponse({
+            'data': {
+              'messages': [
+                {
+                  'id': 'srv_asst_cached',
+                  'role': 'assistant',
+                  'content': 'Already generated cached content',
+                  'model': 'gpt-4o',
+                  'provider': 'openai',
+                  'reasoning': 'Already reasoned',
+                  'metadata': {'conduitClientId': 'resp_existing_alias'},
+                },
+              ],
+            },
+          }),
+        );
 
-      final session = await lobeApi.sendMessageSession(
-        messages: [
-          {'role': 'user', 'content': 'Prompt'}
-        ],
-        model: 'gpt-4o',
-        conversationId: 'tpc_existing_alias',
-        responseMessageId: 'resp_existing_alias',
-      );
+        final session = await lobeApi.sendMessageSession(
+          messages: [
+            {'role': 'user', 'content': 'Prompt'},
+          ],
+          model: 'gpt-4o',
+          conversationId: 'tpc_existing_alias',
+          responseMessageId: 'resp_existing_alias',
+        );
 
-      // Returns completed session with existing content
-      check(session.transport).equals(ChatCompletionTransport.jsonCompletion);
-      check(session.messageId).equals('resp_existing_alias');
-      final msg = (session.jsonPayload!['choices'] as List).first['message'] as Map;
-      check(msg['content']).equals('Already generated cached content');
-      check(msg['reasoning_content']).equals('Already reasoned');
+        // Returns completed session with existing content
+        check(session.transport).equals(ChatCompletionTransport.jsonCompletion);
+        check(session.messageId).equals('resp_existing_alias');
+        final msg =
+            (session.jsonPayload!['choices'] as List).first['message'] as Map;
+        check(msg['content']).equals('Already generated cached content');
+        check(msg['reasoning_content']).equals('Already reasoned');
 
-      // Assert zero inference POST to /api/v1/chat or /api/v1/responses
-      check(adapter.requestedPaths.contains('/api/v1/chat')).isFalse();
-      check(adapter.requestedPaths.contains('/api/v1/responses')).isFalse();
-    });
+        // Assert zero inference POST to /api/v1/chat or /api/v1/responses
+        check(adapter.requestedPaths.contains('/api/v1/chat')).isFalse();
+        check(adapter.requestedPaths.contains('/api/v1/responses')).isFalse();
+      },
+    );
 
     test('Fails on response.completed status failed in SSE stream', () async {
       adapter.registerHandler(
         method: 'GET',
         path: '/api/v1/agents/agt_fail',
         handler: (_) => _jsonResponse({
-          'data': {
-            'id': 'agt_fail',
-            'model': 'gpt-4o',
-          }
+          'data': {'id': 'agt_fail', 'model': 'gpt-4o'},
         }),
       );
 
@@ -474,7 +909,7 @@ void main() {
         method: 'GET',
         path: '/api/v1/messages',
         handler: (_) => _jsonResponse({
-          'data': {'messages': []}
+          'data': {'messages': []},
         }),
       );
 
@@ -488,7 +923,7 @@ void main() {
 
       final session = await lobeApi.sendMessageSession(
         messages: [
-          {'role': 'user', 'content': 'Hello'}
+          {'role': 'user', 'content': 'Hello'},
         ],
         model: 'gpt-4o',
         conversationId: 'tpc_fail',
@@ -498,32 +933,36 @@ void main() {
       await check(session.byteStream!.toList()).throws<SyncTerminalException>();
     });
 
-    test('sendChatCompleted and task endpoints are safe no-ops on LobeHub', () async {
-      final res = await lobeApi.sendChatCompleted(
-        chatId: 'c1',
-        messageId: 'm1',
-        messages: [],
-        model: 'gpt-4o',
-      );
-      check(res).isNull();
+    test(
+      'sendChatCompleted and task endpoints are safe no-ops on LobeHub',
+      () async {
+        final res = await lobeApi.sendChatCompleted(
+          chatId: 'c1',
+          messageId: 'm1',
+          messages: [],
+          model: 'gpt-4o',
+        );
+        check(res).isNull();
 
-      await lobeApi.stopTask('task_123');
-      await lobeApi.stopTasksByChat('c1');
-      final taskIds = await lobeApi.getTaskIdsByChat('c1');
-      check(taskIds).isEmpty();
+        await lobeApi.stopTask('task_123');
+        await lobeApi.stopTasksByChat('c1');
+        final taskIds = await lobeApi.getTaskIdsByChat('c1');
+        check(taskIds).isEmpty();
 
-      final active = await lobeApi.checkActiveChats(['c1']);
-      check(active).isEmpty();
+        final active = await lobeApi.checkActiveChats(['c1']);
+        check(active).isEmpty();
 
-      check(adapter.requests).isEmpty();
-    });
+        check(adapter.requests).isEmpty();
+      },
+    );
   });
 }
 
 class _MockHttpClientAdapter implements HttpClientAdapter {
   final List<RequestOptions> requests = [];
   final List<String> requestedPaths = [];
-  final Map<String, ResponseBody Function(RequestOptions options)> _handlers = {};
+  final Map<String, ResponseBody Function(RequestOptions options)> _handlers =
+      {};
 
   void registerHandler({
     required String method,
@@ -547,7 +986,7 @@ class _MockHttpClientAdapter implements HttpClientAdapter {
     if (handler != null) {
       return handler(options);
     }
-    return _jsonResponse({});
+    throw StateError('Unregistered mock request: $key');
   }
 
   @override
