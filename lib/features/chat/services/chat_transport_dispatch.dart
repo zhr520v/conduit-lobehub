@@ -1,6 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:conduit_core/models/chat_message.dart';
+import 'package:conduit_core/models/server_config.dart';
+import 'package:dio/dio.dart';
 
 import '../../../shared/services/flutter_ui_requests.dart';
 
@@ -258,6 +261,18 @@ Future<bool> dispatchChatTransport({
   // `/api/chat/completed` callback must keep the account that authorized the
   // stream instead of adopting a token selected while generation was active.
   final chatCompletedAuthSnapshot = api.captureAuthSnapshot();
+  final lobeAuthenticationEpoch = api.authenticationEpoch;
+  final lobeOwner = api.serverConfig.isLobeHub &&
+          !isTemporary &&
+          !isResume &&
+          activeConversationId != null &&
+          activeConversationId.isNotEmpty
+      ? captureOpenWebUiCompletionOwner(
+          ref,
+          chatId: activeConversationId,
+          api: api,
+        )
+      : null;
 
   // 1. Write transport + flow metadata onto assistant message
   writeTransportMetadata(
@@ -325,6 +340,92 @@ Future<bool> dispatchChatTransport({
       ? null
       : (socketService?.sessionId ?? session.sessionId);
 
+  Map<String, dynamic>? submittedMetadata;
+  final lobeDatabase = lobeOwner?.database;
+  if (lobeOwner != null && lobeDatabase != null) {
+    if (!openWebUiCompletionContextIsCurrent(ref, lobeOwner)) return false;
+    final row = await lobeDatabase.messagesDao.getMessage(
+      lobeOwner.chatId,
+      assistantMessageId,
+    );
+    if (!ownsPending() ||
+        !openWebUiCompletionContextIsCurrent(ref, lobeOwner)) {
+      return false;
+    }
+    if (row != null) {
+      final payload = jsonDecode(row.payload) as Map<String, dynamic>;
+      final metadata = payload['metadata'];
+      if (metadata is Map && metadata['completionSubmitted'] == true) {
+        submittedMetadata = Map<String, dynamic>.from(metadata);
+        messagesNotifier().updateMessageById(
+          assistantMessageId,
+          (message) => message.copyWith(
+            metadata: {...?message.metadata, ...?submittedMetadata},
+          ),
+        );
+      }
+    }
+  }
+  Interceptor? aliasMarkerInterceptor;
+  var streamRetired = false;
+  var failureSettlementPending = false;
+  bool ownsLobeContext() =>
+      !streamRetired &&
+      ownsConversation() &&
+      api.authenticationEpoch == lobeAuthenticationEpoch &&
+      activeOpenWebUiChatIdForMutation(ref, lobeOwner!) != null;
+  if (submittedMetadata?['lobeAgentCorrelation'] is Map) {
+    aliasMarkerInterceptor = InterceptorsWrapper(
+      onRequest: (options, handler) {
+        final data = options.data;
+        final metadata = data is Map ? data['metadata'] : null;
+        final correlation = submittedMetadata!['lobeAgentCorrelation'] as Map;
+        final aliasesAssistant = metadata is Map &&
+            metadata['conduitClientId'] == assistantMessageId;
+        final aliasesUser = metadata is Map &&
+            metadata['conduitClientId'] == correlation['userLocalId'];
+        final readsTurn = options.method == 'GET' &&
+            options.path == '/api/v1/messages' &&
+            options.queryParameters['topicId'] == lobeOwner!.chatId;
+        final aliasesTurn = options.method == 'PATCH' &&
+            options.path.startsWith('/api/v1/messages/') &&
+            (aliasesAssistant || aliasesUser);
+        if (readsTurn || aliasesTurn) {
+          if (!ownsLobeContext()) {
+            handler.reject(
+              DioException(
+                requestOptions: options,
+                type: DioExceptionType.cancel,
+              ),
+            );
+            return;
+          }
+        }
+        if (aliasesTurn && aliasesAssistant) {
+          options.data = {
+            ...data as Map,
+            'metadata': {
+              ...metadata,
+              'completionSubmitted': true,
+              'lobeAgentCorrelation': submittedMetadata['lobeAgentCorrelation'],
+            },
+          };
+        }
+        handler.next(options);
+      },
+    );
+    api.dio.interceptors.add(aliasMarkerInterceptor);
+  }
+  void releaseAliasMarkerInterceptor() {
+    streamRetired = true;
+    if (failureSettlementPending) return;
+    final interceptor = aliasMarkerInterceptor;
+    if (interceptor != null) {
+      api.dio.interceptors.remove(interceptor);
+      aliasMarkerInterceptor = null;
+    }
+  }
+
   // 5. Attach streaming
   final activeStream = attachUnifiedChunkedStreaming(
     // The Flutter surface for server-initiated prompts and notices;
@@ -385,6 +486,45 @@ Future<bool> dispatchChatTransport({
     modelUsesReasoning: modelUsesReasoning,
     toolsEnabled: toolsEnabled,
     ownsStreamContext: ownsConversation,
+    onHttpStreamFailure: submittedMetadata == null
+        ? null
+        : (error, stackTrace, ownsSettlement) async {
+            bool isCurrent() =>
+                ownsSettlement() &&
+                ownsLobeContext() &&
+                messagesNotifier().messagesSnapshot.lastOrNull?.id ==
+                    assistantMessageId &&
+                messagesNotifier().messagesSnapshot.lastOrNull?.isStreaming ==
+                    true;
+            if (!isCurrent()) return;
+            failureSettlementPending = true;
+            try {
+              final settled = await settleForegroundLobeHubStreamFailure(
+                ref,
+                owner: lobeOwner!,
+                partial: messagesNotifier().messagesSnapshot.last,
+                trailingUser: messagesNotifier().messagesSnapshot
+                    .where((message) => message.role == 'user')
+                    .lastOrNull,
+                submittedMetadata: submittedMetadata!,
+                ownsSettlement: isCurrent,
+              );
+              if (!isCurrent() || settled == null) return;
+              messagesNotifier().updateMessageById(
+                assistantMessageId,
+                (_) => settled.copyWith(isStreaming: true),
+              );
+              messagesNotifier().finishStreamingMessage(
+                assistantMessageId,
+                ownerConversationId: lobeOwner.chatId,
+                requireConversationOwner: true,
+                persistTurn: false,
+              );
+            } finally {
+              failureSettlementPending = false;
+              releaseAliasMarkerInterceptor();
+            }
+          },
     onChatTitleUpdated: (newTitle) {
       if (!ownsConversation()) return;
       final active = ref.read(activeConversationProvider);
@@ -536,6 +676,7 @@ Future<bool> dispatchChatTransport({
 
   if (!ownsConversation()) {
     activeStream.disposeWatchdog();
+    releaseAliasMarkerInterceptor();
     return false;
   }
 
@@ -544,6 +685,7 @@ Future<bool> dispatchChatTransport({
   // message and dispose every local streaming resource before attach returns.
   // Do not resurrect that completed transport in the notifier.
   if (activeStream.isDisposed()) {
+    releaseAliasMarkerInterceptor();
     return true;
   }
 
@@ -558,7 +700,10 @@ Future<bool> dispatchChatTransport({
   notifier.setSocketSubscriptions(
     assistantMessageId,
     activeStream.socketSubscriptions,
-    onDispose: activeStream.disposeWatchdog,
+    onDispose: () {
+      activeStream.disposeWatchdog();
+      releaseAliasMarkerInterceptor();
+    },
   );
   return true;
 }

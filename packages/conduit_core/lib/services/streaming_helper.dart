@@ -674,6 +674,12 @@ ActiveChatStream attachUnifiedChunkedStreaming({
   /// conversation. When null or when it yields null (engine inert), the
   /// legacy direct `api.getConversation` fetch is used instead.
   Future<Conversation?> Function(String chatId)? pullChatSnapshot,
+  Future<void> Function(
+    Object error,
+    StackTrace stackTrace,
+    bool Function() ownsSettlement,
+  )?
+  onHttpStreamFailure,
 }) {
   // Track if streaming has been finished to avoid duplicate cleanup
   bool hasFinished = false;
@@ -4336,9 +4342,10 @@ ActiveChatStream attachUnifiedChunkedStreaming({
       if (localResourcesDisposed) break;
       // Parse the SSE byte stream directly via the typed parser.
       bool receivedDone = false;
+      bool failureSettlementStarted = false;
       final sub = parseOpenWebUIStream(session.byteStream!).listen(
         (update) {
-          if (localResourcesDisposed) {
+          if (localResourcesDisposed || failureSettlementStarted) {
             return;
           }
           try {
@@ -4374,7 +4381,35 @@ ActiveChatStream attachUnifiedChunkedStreaming({
           }
         },
         onError: (Object error, StackTrace stackTrace) {
-          if (localResourcesDisposed) {
+          if (localResourcesDisposed || failureSettlementStarted) {
+            return;
+          }
+          final settleFailure = onHttpStreamFailure;
+          if (settleFailure != null) {
+            failureSettlementStarted = true;
+            hasFinished = true;
+            if (!(ownsStreamContext?.call() ?? true)) {
+              disposeLocalStreamingResources(abandonStream: true);
+              return;
+            }
+            flushRawReasoningTags();
+            finalizeStreamingReasoning();
+            finalizeStructuredOutputProjection();
+            flushStreamingBuffer();
+            unawaited(() async {
+              try {
+                await settleFailure(
+                  error,
+                  stackTrace,
+                  () =>
+                      !localResourcesDisposed &&
+                      !isObsoleteStream &&
+                      (ownsStreamContext?.call() ?? true),
+                );
+              } finally {
+                disposeLocalStreamingResources(abandonStream: false);
+              }
+            }());
             return;
           }
           DebugLogger.error(
