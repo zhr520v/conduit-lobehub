@@ -137,11 +137,13 @@ Conduit typography maps onto an adaptive scale defined in `AppTypography`:
 ### Agent-to-Chat Flow Contract
 1. **Trigger**: User selects agent card -> taps "Start New Chat (开启新对话)".
 2. **Server Topic Creation**: Calls `LobeHubApiClient.createTopic(title: agentTitle, agentId: agent.id)`. The topic is directly bound to the chosen `agentId`.
-3. **Model Selection**: The true underlying model is looked up in the model roster by **BOTH** `modelId` and `provider`. The agent is **NEVER** injected as a fake model or fallback.
-4. **Metadata Preservation**: Local `Conversation` preserves `agentId`, `agentTitle`, and `systemRole` in metadata.
+3. **Model Selection**: The true underlying model is looked up in the model roster by **BOTH** `modelId` and `provider`. The agent is **NEVER** injected as a fake model or fallback. Missing configured models/providers are visible failures. Global selection changes only after verified online creation and activation succeed.
+4. **Metadata Preservation**: Reloaded and persisted `Conversation` identity uses `backend: lobehub`, `agentId`, `agentTitle`, `agentModel`, and `provider`. Identity comes from the server topic and exact Agent details, not an optimistic summary or the globally selected model.
 5. **Activation Seam**: Invokes `conversationSelectionProvider.notifier.select(summary)`.
-6. **Authentication Preservation**: Auth state is verified across async boundaries.
+6. **Authentication Preservation**: The existing account/server owner, auth-session epoch, and client transport identity are verified across every async boundary. Missing clients, detail errors, unverified/local topic IDs, and mismatched Agent IDs cannot succeed.
 7. **Failure Isolation**: On error, an error SnackBar is displayed; navigation tab does **NOT** switch to 0. On success, navigation smoothly switches to Tab 0 (`Chats`).
+8. **Bound Role Header**: Within the existing adaptive toolbar, the Agent title is primary and its configured model/provider is separate secondary read-only information. Full role/model/provider text and the v2.2.17 model-override limitation remain accessible via semantics/tooltip. Tapping the role opens the existing Agents tab (index 1), never the model roster. Non-LobeHub and Hermes titles remain unchanged.
+9. **Queued Identity**: Headless dispatch uses the target conversation's verified Agent/model/provider configuration. Another chat's global model selection cannot supply or override that provider.
 
 ---
 

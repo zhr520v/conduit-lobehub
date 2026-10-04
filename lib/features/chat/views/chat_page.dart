@@ -63,6 +63,7 @@ import 'package:conduit_core/features/hermes/services/hermes_session_provenance.
 
 import '../../hermes/widgets/hermes_bot_avatar.dart';
 import '../../hermes/widgets/hermes_message_interactions.dart';
+import '../../lobehub/widgets/lobehub_role_header.dart';
 
 import 'package:conduit_core/utils/debug_logger.dart';
 
@@ -1357,6 +1358,35 @@ class _ChatPageState extends ConsumerState<ChatPage> {
       transcriptWasEmpty: ref.read(chatMessagesProvider).isEmpty,
     );
     dynamic selectedModel = ref.read(selectedModelProvider);
+    final roleConversation = ref.read(activeConversationProvider);
+    final role = LobeHubRolePresentation.fromConversation(roleConversation);
+    if (role != null) {
+      final owner = captureOpenWebUiConversationSelectionOwner(ref);
+      final api = ref.read(apiServiceProvider);
+      final authenticationEpoch = api?.authenticationEpoch;
+      bool ownsRole() => mounted && owner != null &&
+          identical(ref.read(apiServiceProvider), api) &&
+          api?.authenticationEpoch == authenticationEpoch &&
+          openWebUiConversationSelectionOwnerIsCurrent(ref, owner) &&
+          isSameStoredConversation(ref.read(activeConversationProvider), roleConversation);
+      try {
+        final roster = await ref.read(modelsProvider.future);
+        if (!ownsRole()) return false;
+        selectedModel = roster.where((model) =>
+            model.id == role.modelId && resolveModelProvider(model) == role.provider).firstOrNull;
+        if (selectedModel == null) {
+          throw StateError('Configured Agent model "${role.modelId ?? 'unavailable'}" from provider "${role.provider ?? 'unavailable'}" is unavailable. Check the Agent configuration on LobeHub.');
+        }
+        ref.read(selectedModelProvider.notifier).set(selectedModel, allowHidden: true);
+      } catch (error, stackTrace) {
+        DebugLogger.error('agent-model-unavailable', scope: 'chat/role',
+            error: error, stackTrace: stackTrace);
+        if (ownsRole() && mounted && context.mounted) {
+          AdaptiveSnackBar.show(context, message: error.toString(), type: AdaptiveSnackBarType.error);
+        }
+        return false;
+      }
+    }
 
     // Resolve model on-demand if none selected yet
     if (selectedModel == null) {
@@ -4141,6 +4171,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     final isLoadingConversation = ref.watch(isLoadingConversationProvider);
     final activeConversation = ref.watch(activeConversationProvider);
     final hermesBot = chatHermesBotPresentation(activeConversation);
+    final lobeRole = LobeHubRolePresentation.fromConversation(activeConversation);
     final formattedModelName = selectedModel != null
         ? _formatModelDisplayName(selectedModel.name)
         : null;
@@ -4203,6 +4234,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
           isLoadingConversation: isLoadingConversation,
           modelLabel: modelLabel,
           hermesBot: hermesBot,
+          lobeRole: lobeRole,
         ),
         body: GestureDetector(
           behavior: HitTestBehavior.translucent,
@@ -4369,6 +4401,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     required bool isLoadingConversation,
     required String modelLabel,
     required HermesBotChatPresentation? hermesBot,
+    required LobeHubRolePresentation? lobeRole,
   }) {
     final activeConversation = ref.watch(activeConversationProvider);
     final isTemporary = ref.watch(temporaryChatEnabledProvider);
@@ -4397,6 +4430,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
       showModelDropdown: showModelDropdown,
       hermesBot: hermesBot,
       hermesBotActive: hermesBot != null && ref.watch(isChatStreamingProvider),
+      lobeRole: lobeRole,
     );
     final actionDescriptors = _buildAdaptiveToolbarActions(
       context: context,
@@ -4449,7 +4483,16 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     required bool showModelDropdown,
     required HermesBotChatPresentation? hermesBot,
     required bool hermesBotActive,
+    required LobeHubRolePresentation? lobeRole,
   }) {
+    if (lobeRole != null) {
+      return LobeHubRoleHeader(
+        role: lobeRole,
+        maxWidth: maxModelWidth,
+        isLoading: isLoadingConversation,
+        onOpenAgents: _dismissComposerFocus,
+      );
+    }
     if (hermesBot != null) {
       return _HermesBotToolbarTitle(
         bot: hermesBot,
