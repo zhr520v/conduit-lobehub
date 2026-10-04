@@ -2,16 +2,22 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:checks/checks.dart';
+import 'package:conduit_core/auth/api_auth_interceptor.dart';
 import 'package:conduit_core/database/app_database.dart';
 import 'package:conduit_core/database/chat_database_repository.dart';
 import 'package:conduit_core/database/daos/outbox_dao.dart';
 import 'package:conduit_core/database/database_provider.dart';
 import 'package:conduit_core/models/chat_message.dart';
 import 'package:conduit_core/models/conversation.dart';
+import 'package:conduit_core/models/server_config.dart';
 import 'package:conduit_core/providers/app_providers.dart';
+import 'package:conduit_core/services/api_service.dart';
+import 'package:conduit_core/services/chat_completion_transport.dart';
 import 'package:conduit_core/sync/outbox_drainer.dart';
+import 'package:conduit_core/sync/sync_api_client.dart';
 import 'package:conduit/features/chat/providers/chat_providers.dart';
 import 'package:conduit/features/chat/services/request_completion_runner.dart';
+import 'package:dio/dio.dart';
 import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -38,12 +44,13 @@ void main() {
   /// Builds the real [ChatRequestCompletionRunner] with a genuine [Ref] via a
   /// throwaway provider, under the given overrides.
   ({ProviderContainer container, RequestCompletionRunner runner}) makeRunner({
-    required bool isStreaming,
+    bool? isStreaming,
     Conversation? active,
     bool attachDatabase = true,
     int recoveryAttempts = 6,
     Duration recoveryDelay = const Duration(seconds: 2),
     Object Function()? authSessionEpoch,
+    ApiService? apiService,
   }) {
     final runnerProvider = Provider<RequestCompletionRunner>((ref) {
       return ChatRequestCompletionRunner(
@@ -55,13 +62,11 @@ void main() {
     final container = ProviderContainer(
       overrides: [
         appDatabaseProvider.overrideWith((ref) => attachDatabase ? db : null),
-        isChatStreamingProvider.overrideWithValue(isStreaming),
+        if (isStreaming != null)
+          isChatStreamingProvider.overrideWithValue(isStreaming),
         chatMessagesProvider.overrideWith(() => _TestMessagesNotifier()),
         activeConversationProvider.overrideWith(() => _SeededActive(active)),
-        // No api/socket stack here: the headless/live drive both short-circuit
-        // on the null-api guard, letting these tests assert the PATH choice
-        // (headless vs live vs defer) without a real transport.
-        apiServiceProvider.overrideWithValue(null),
+        apiServiceProvider.overrideWithValue(apiService),
         socketServiceProvider.overrideWithValue(null),
         if (authSessionEpoch != null)
           openWebUiAuthSessionEpochProvider.overrideWith(
@@ -505,6 +510,404 @@ void main() {
     check(chatStorageKindOf(container.read(activeConversationProvider)))
         .equals(ChatStorageKind.directLocal);
   });
+
+  test(
+    'live drive terminal 400 unsupported vision settles Drift row and active UI with isStreaming=false and visible error, and re-arms on manual retry',
+    () async {
+      const chatId = 'chat-terminal-live';
+      const assistantId = 'asst-terminal-live';
+      await seedChat(chatId);
+      await seedMessage(
+        chatId,
+        assistantId,
+        '',
+        payload: const <String, dynamic>{
+          'id': assistantId,
+          'role': 'assistant',
+          'content': '',
+          'isStreaming': true,
+        },
+      );
+
+      final fakeApi = _FakeCompletionApiService(
+        onSendMessageSession: () async {
+          throw const SyncTerminalException(
+            statusCode: 400,
+            message: 'unsupported vision',
+          );
+        },
+      );
+
+      final (:container, :runner) = makeRunner(
+        active: conv(chatId),
+        apiService: fakeApi,
+      );
+
+      container.read(chatMessagesProvider.notifier).setMessages([
+        ChatMessage(
+          id: 'user-live',
+          role: 'user',
+          content: 'look at this image',
+          timestamp: DateTime.utc(2026, 7, 14),
+        ),
+        ChatMessage(
+          id: assistantId,
+          role: 'assistant',
+          content: '',
+          timestamp: DateTime.utc(2026, 7, 14, 0, 0, 1),
+          isStreaming: true,
+        ),
+      ]);
+
+      await check(
+        runner.run(chatId: chatId, payload: payload(assistantId)),
+      ).throws<SyncTerminalException>();
+
+      // Drift DB row must be settled with isStreaming=false, visible error,
+      // completionSubmitted=false, terminal=true, and no responseDone.
+      final row = await db.messagesDao.getMessage(chatId, assistantId);
+      check(row).isNotNull();
+      final payloadMap = jsonDecode(row!.payload) as Map<String, dynamic>;
+      final metadata = payloadMap['metadata'] as Map<String, dynamic>;
+      check(payloadMap['isStreaming']).equals(false);
+      check(payloadMap['done']).isNull();
+      check((payloadMap['error'] as Map)['content']).equals('unsupported vision');
+      check(metadata['completionSubmitted']).equals(false);
+      check(metadata['terminal']).equals(true);
+      check(metadata.containsKey('responseDone')).isFalse();
+
+      // Active UI must be updated immediately with isStreaming=false and error.
+      final activeMsgs = container.read(chatMessagesProvider);
+      final activeAsst = activeMsgs.firstWhere((m) => m.id == assistantId);
+      check(activeAsst.isStreaming).equals(false);
+      check(activeAsst.error?.content).equals('unsupported vision');
+      check(container.read(isChatStreamingProvider)).equals(false);
+
+      // Manual retry requeue semantics:
+      // A subsequent run on the terminal placeholder must not be bypassed as
+      // "already completed"; it must re-arm the row in DB and active UI!
+      var retryCallCount = 0;
+      final retryFakeApi = _FakeCompletionApiService(
+        onSendMessageSession: () async {
+          retryCallCount++;
+          throw const SyncTerminalException(
+            statusCode: 400,
+            message: 'unsupported vision second attempt',
+          );
+        },
+      );
+      final (container: retryContainer, runner: retryRunner) = makeRunner(
+        active: conv(chatId),
+        apiService: retryFakeApi,
+      );
+      retryContainer.read(chatMessagesProvider.notifier).setMessages([
+        activeAsst, // row is currently in failed terminal state (isStreaming: false)
+      ]);
+
+      await check(
+        retryRunner.run(chatId: chatId, payload: payload(assistantId)),
+      ).throws<SyncTerminalException>();
+      check(retryCallCount).equals(1); // Not bypassed by _placeholderMarkedComplete!
+    },
+  );
+
+  test(
+    'live drive DioException 401 terminal error sanitizes credentials and settles row in Drift and active UI',
+    () async {
+      const chatId = 'chat-dio-401';
+      const assistantId = 'asst-dio-401';
+      await seedChat(chatId);
+      await seedMessage(
+        chatId,
+        assistantId,
+        '',
+        payload: const <String, dynamic>{
+          'id': assistantId,
+          'role': 'assistant',
+          'content': '',
+          'isStreaming': true,
+        },
+      );
+
+      final fakeApi = _FakeCompletionApiService(
+        onSendMessageSession: () async {
+          throw DioException(
+            requestOptions: RequestOptions(
+              path: '/api/chat/completions',
+              headers: {'Authorization': 'Bearer secret-token-xyz'},
+            ),
+            response: Response(
+              requestOptions: RequestOptions(path: '/api/chat/completions'),
+              statusCode: 401,
+              data: {'detail': 'Invalid API Key Bearer secret-token-xyz'},
+            ),
+          );
+        },
+      );
+
+      final (:container, :runner) = makeRunner(
+        active: conv(chatId),
+        apiService: fakeApi,
+      );
+
+      container.read(chatMessagesProvider.notifier).setMessages([
+        ChatMessage(
+          id: assistantId,
+          role: 'assistant',
+          content: '',
+          timestamp: DateTime.utc(2026, 7, 14),
+          isStreaming: true,
+        ),
+      ]);
+
+      SyncTerminalException? thrown;
+      try {
+        await runner.run(chatId: chatId, payload: payload(assistantId));
+      } on SyncTerminalException catch (e) {
+        thrown = e;
+      }
+      check(thrown).isNotNull();
+      check(thrown!.statusCode).equals(401);
+
+      // Check Drift row
+      final row = await db.messagesDao.getMessage(chatId, assistantId);
+      check(row).isNotNull();
+      final payloadMap = jsonDecode(row!.payload) as Map<String, dynamic>;
+      final metadata = payloadMap['metadata'] as Map<String, dynamic>;
+      check(payloadMap['isStreaming']).equals(false);
+      final errorContent = (payloadMap['error'] as Map)['content'] as String;
+      check(errorContent.contains('secret-token-xyz')).isFalse();
+      check(metadata['completionSubmitted']).equals(false);
+      check(metadata['terminal']).equals(true);
+
+      // Check Active UI
+      final activeMsgs = container.read(chatMessagesProvider);
+      final activeAsst = activeMsgs.firstWhere((m) => m.id == assistantId);
+      check(activeAsst.isStreaming).equals(false);
+      check(activeAsst.error?.content?.contains('secret-token-xyz') ?? false)
+          .isFalse();
+    },
+  );
+
+  test(
+    'headless drive terminal 400 failure settles DB row without mutating active foreign chat',
+    () async {
+      const chatId = 'chat-headless-fail';
+      const assistantId = 'asst-headless-fail';
+      await seedChat(chatId);
+      await seedMessage(
+        chatId,
+        assistantId,
+        '',
+        payload: const <String, dynamic>{
+          'id': assistantId,
+          'role': 'assistant',
+          'content': '',
+          'isStreaming': true,
+        },
+      );
+
+      final fakeApi = _FakeCompletionApiService(
+        onSendMessageSession: () async {
+          throw const SyncTerminalException(
+            statusCode: 400,
+            message: 'unsupported vision',
+          );
+        },
+      );
+
+      final foreignMessage = ChatMessage(
+        id: 'foreign-msg',
+        role: 'user',
+        content: 'I am in a different chat',
+        timestamp: DateTime.utc(2026, 7, 14),
+      );
+
+      final (:container, :runner) = makeRunner(
+        active: conv('a-different-chat'),
+        apiService: fakeApi,
+      );
+      container.read(chatMessagesProvider.notifier).setMessages([foreignMessage]);
+
+      await check(
+        runner.run(chatId: chatId, payload: payload(assistantId)),
+      ).throws<SyncTerminalException>();
+
+      // Target chat row is settled in DB
+      final row = await db.messagesDao.getMessage(chatId, assistantId);
+      check(row).isNotNull();
+      final payloadMap = jsonDecode(row!.payload) as Map<String, dynamic>;
+      check(payloadMap['isStreaming']).equals(false);
+      check((payloadMap['error'] as Map)['content']).equals('unsupported vision');
+      final metadata = payloadMap['metadata'] as Map<String, dynamic>;
+      check(metadata['completionSubmitted']).equals(false);
+      check(metadata['terminal']).equals(true);
+
+      // Active foreign conversation UI was NOT mutated
+      check(container.read(activeConversationProvider)?.id)
+          .equals('a-different-chat');
+      final activeMsgs = container.read(chatMessagesProvider);
+      check(activeMsgs.single.id).equals('foreign-msg');
+    },
+  );
+
+  test(
+    'transient network failure leaves placeholder streaming and does not mark terminal or responseDone',
+    () async {
+      const chatId = 'chat-transient-net';
+      const assistantId = 'asst-transient-net';
+      await seedChat(chatId);
+      await seedMessage(
+        chatId,
+        assistantId,
+        '',
+        payload: const <String, dynamic>{
+          'id': assistantId,
+          'role': 'assistant',
+          'content': '',
+          'isStreaming': true,
+        },
+      );
+
+      final fakeApi = _FakeCompletionApiService(
+        onSendMessageSession: () async {
+          throw DioException(
+            requestOptions: RequestOptions(path: '/api/chat/completions'),
+            type: DioExceptionType.connectionTimeout,
+            message: 'Connection timed out',
+          );
+        },
+      );
+
+      final (:container, :runner) = makeRunner(
+        active: conv(chatId),
+        apiService: fakeApi,
+      );
+      container.read(chatMessagesProvider.notifier).setMessages([
+        ChatMessage(
+          id: assistantId,
+          role: 'assistant',
+          content: '',
+          timestamp: DateTime.utc(2026, 7, 14),
+          isStreaming: true,
+        ),
+      ]);
+
+      await check(
+        runner.run(chatId: chatId, payload: payload(assistantId)),
+      ).throws<DioException>();
+
+      // Drift DB row must remain streaming, no terminal marker, no error, no responseDone!
+      final row = await db.messagesDao.getMessage(chatId, assistantId);
+      check(row).isNotNull();
+      final payloadMap = jsonDecode(row!.payload) as Map<String, dynamic>;
+      check(payloadMap['isStreaming']).equals(true);
+      check(payloadMap.containsKey('error')).isFalse();
+      final metadata = payloadMap['metadata'] as Map<String, dynamic>?;
+      check(metadata?['terminal'] == true).isFalse();
+      check(metadata?['responseDone'] == true).isFalse();
+
+      // Active UI also remains streaming
+      final activeAsst = container.read(chatMessagesProvider).single;
+      check(activeAsst.isStreaming).equals(true);
+      check(activeAsst.error).isNull();
+    },
+  );
+
+  test(
+    'accepted submitted completion uses recovery path and does not re-POST or settle pre-submission failure',
+    () async {
+      const chatId = 'chat-submitted-no-repost';
+      const assistantId = 'asst-submitted-no-repost';
+      await seedChat(chatId);
+      await seedMessage(
+        chatId,
+        assistantId,
+        'prior partial content',
+        payload: const <String, dynamic>{
+          'id': assistantId,
+          'role': 'assistant',
+          'content': 'prior partial content',
+          'metadata': <String, dynamic>{'completionSubmitted': true},
+        },
+      );
+
+      var sendCalled = false;
+      final fakeApi = _FakeCompletionApiService(
+        onSendMessageSession: () async {
+          sendCalled = true;
+          throw const SyncTerminalException(
+            statusCode: 400,
+            message: 'should not be called',
+          );
+        },
+      );
+
+      final (:container, :runner) = makeRunner(
+        active: conv(chatId),
+        apiService: fakeApi,
+        recoveryAttempts: 1,
+        recoveryDelay: Duration.zero,
+      );
+
+      await runner.run(chatId: chatId, payload: payload(assistantId));
+
+      check(sendCalled).isFalse(); // Never re-POSTs an accepted submission!
+      final row = await db.messagesDao.getMessage(chatId, assistantId);
+      check(row?.content).equals('prior partial content');
+    },
+  );
+}
+
+class _FakeCompletionApiService extends Fake implements ApiService {
+  _FakeCompletionApiService({this.onSendMessageSession});
+
+  @override
+  final ServerConfig serverConfig = const ServerConfig(
+    id: 'server-1',
+    name: 'S',
+    url: 'http://localhost',
+  );
+
+  final Future<ChatCompletionSession> Function()? onSendMessageSession;
+
+  @override
+  Future<Map<String, dynamic>> getUserSettings({
+    ApiAuthSnapshot? authSnapshot,
+  }) async => <String, dynamic>{};
+
+  @override
+  Future<ChatCompletionSession> sendMessageSession({
+    required List<Map<String, dynamic>> messages,
+    required String model,
+    String? conversationId,
+    String? terminalId,
+    List<String>? toolIds,
+    List<String>? filterIds,
+    List<String>? skillIds,
+    bool enableWebSearch = false,
+    bool enableImageGeneration = false,
+    bool enableCodeInterpreter = false,
+    bool isVoiceMode = false,
+    Map<String, dynamic>? modelItem,
+    String? sessionIdOverride,
+    List<Map<String, dynamic>>? toolServers,
+    Map<String, dynamic>? backgroundTasks,
+    String? responseMessageId,
+    Map<String, dynamic>? userSettings,
+    String? reasoningEffort,
+    String? parentId,
+    Map<String, dynamic>? userMessage,
+    Map<String, dynamic>? variables,
+    List<Map<String, dynamic>>? files,
+    String? lobeAgentId,
+    Future<void> Function(LobeAgentCorrelation correlation)? onPreDispatch,
+  }) async {
+    if (onSendMessageSession != null) {
+      return await onSendMessageSession!();
+    }
+    throw UnimplementedError();
+  }
 }
 
 class _SeededActive extends ActiveConversationNotifier {

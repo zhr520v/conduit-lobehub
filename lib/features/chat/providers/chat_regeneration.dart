@@ -935,10 +935,14 @@ Future<void> regenerateMessage(
         (forceImageGeneration || ref.read(imageGenerationEnabledProvider)) &&
         ref.read(imageGenerationAvailableProvider);
 
-    final modelItem = _buildLocalModelItem(
+    final rawModelItem = _buildLocalModelItem(
       selectedModel,
       trustedDirectBinding: openWebUiDirectRoute?.binding,
       wireModelId: serverModelId,
+    );
+    final modelItem = ensureModelItemProvider(
+      modelItem: rawModelItem,
+      selectedModel: selectedModel,
     );
 
     // Reconnect before choosing session_id so eligible sends stay on the
@@ -1064,6 +1068,14 @@ Future<void> regenerateMessage(
         );
         return;
       }
+      final activeConversation =
+          ref.read(activeConversationProvider) as Conversation?;
+      final lobeAgentId = resolveLobeAgentId(activeConversation);
+      final onPreDispatch = buildLobeHubAgentPreDispatchCallback(
+        ref,
+        owner: regenerationOwner,
+        assistantMessageId: assistantMessageId,
+      );
       // Use transport-aware session dispatch
       final session = await api!.sendMessageSession(
         messages: requestMessages,
@@ -1085,6 +1097,8 @@ Future<void> regenerateMessage(
         userMessage: parentMsgMap,
         variables: promptVars2,
         files: _extractTopLevelRequestFiles(parentMsgMap),
+        lobeAgentId: lobeAgentId,
+        onPreDispatch: onPreDispatch,
       );
       submittedSession = session;
 

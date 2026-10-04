@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -88,6 +88,7 @@ Widget createTestApp({
   return ProviderScope(
     overrides: [
       lobeAgentsProvider.overrideWith(() => notifier),
+      lobeHubApiClientProvider.overrideWithValue(null),
     ],
     child: MaterialApp(
       theme: AppTheme.light(TweakcnThemes.conduit),
@@ -390,7 +391,10 @@ void main() {
 
       // Verify full system instructions are displayed in scrollable view
       expect(
-        find.text('You are a master novelist and creative writing assistant.'),
+        find.descendant(
+          of: find.byKey(const ValueKey('system-prompt-bottom-sheet')),
+          matching: find.text('You are a master novelist and creative writing assistant.'),
+        ),
         findsOneWidget,
       );
       expect(find.textContaining('System Prompt (系统设定)'), findsOneWidget);

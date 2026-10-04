@@ -1,33 +1,138 @@
+// ignore_for_file: scoped_providers_should_specify_dependencies
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:conduit_core/features/lobehub/models/lobe_agent.dart';
+import 'package:conduit_core/features/lobehub/models/lobe_topic.dart';
 import 'package:conduit_core/features/lobehub/providers/lobehub_agents_provider.dart';
+import 'package:conduit_core/features/lobehub/providers/lobehub_topics_provider.dart';
+import 'package:conduit_core/models/conversation.dart';
+import 'package:conduit_core/models/model.dart';
+import 'package:conduit_core/models/server_config.dart';
+import 'package:conduit_core/providers/app_providers.dart';
 
-import 'package:conduit/features/agents/views/lobe_agents_page.dart';
+import 'package:conduit/features/navigation/providers/conversation_selection_provider.dart';
 import 'package:conduit/features/navigation/views/main_navigation_shell.dart';
 import 'package:conduit/features/settings/views/lobe_settings_page.dart';
 import 'package:conduit/l10n/app_localizations.dart';
 import 'package:conduit/l10n/conduit_localizations.dart';
-import 'package:conduit/shared/theme/app_theme.dart';
-import 'package:conduit/shared/theme/tweakcn_themes.dart';
 import 'package:conduit/shared/widgets/platform_ui/platform_ui.dart';
+
+class _TestModelsNotifier extends Models {
+  _TestModelsNotifier(this._models);
+  final List<Model> _models;
+
+  @override
+  Future<List<Model>> build() async => _models;
+}
+
+class _TestSelectedModelNotifier extends SelectedModel {
+  _TestSelectedModelNotifier();
+
+  @override
+  Model? build() => null;
+
+  @override
+  void set(Model? model, {bool allowHidden = false}) {
+    state = model;
+  }
+}
+
+class _TestReviewerModeNotifier extends ReviewerMode {
+  _TestReviewerModeNotifier([this._initial = false]);
+  final bool _initial;
+
+  @override
+  bool build() => _initial;
+}
+
+class _TestFakeLobeTopicsNotifier extends LobeTopicsNotifier {
+  LobeTopic? lastCreatedTopic;
+
+  @override
+  LobeTopicsState build() => const LobeTopicsState();
+
+  @override
+  Future<LobeTopic> createTopic({
+    required String title,
+    String? agentId,
+    String? sessionId,
+    Map<String, dynamic>? metadata,
+  }) async {
+    final topic = LobeTopic(
+      id: 'server_topic_shell',
+      title: title,
+      agentId: agentId,
+      sessionId: sessionId,
+      metadata: metadata ?? const <String, dynamic>{},
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+    lastCreatedTopic = topic;
+    state = state.copyWith(
+      topics: [topic, ...state.topics],
+      activeTopicId: topic.id,
+    );
+    return topic;
+  }
+}
+
+class _TestFakeConversationSelection extends ConversationSelection {
+  Conversation? lastSelectedConversation;
+
+  @override
+  ConversationSelectionState build() => const ConversationSelectionState();
+
+  @override
+  Future<ConversationSelectionResult> select(Conversation summary) async {
+    lastSelectedConversation = summary;
+    return const ConversationSelectionResult.committed();
+  }
+}
+
+class _TestAgentsNotifier extends LobeAgentsNotifier {
+  _TestAgentsNotifier(this._initialState);
+
+  final LobeAgentsState _initialState;
+
+  @override
+  LobeAgentsState build() => _initialState;
+}
 
 Widget createTestHarness({
   required Widget child,
   List<Override> overrides = const [],
+  LobeAgentsState? agentsState,
   Size size = const Size(390, 844),
   TargetPlatform platform = TargetPlatform.android,
 }) {
   PlatformUiCapabilities.debugPlatformOverride = platform;
-  final theme = AppTheme.light(TweakcnThemes.conduit);
 
   return ProviderScope(
-    overrides: overrides,
+    overrides: [
+      activeServerProvider.overrideWith(
+        (ref) => Future.value(
+          const ServerConfig(
+            id: 'lobehub_self_hosted',
+            name: 'LobeHub',
+            url: 'https://ai.opw.ink',
+          ),
+        ),
+      ),
+      apiServiceProvider.overrideWith((ref) => null),
+      reviewerModeProvider.overrideWith(() => _TestReviewerModeNotifier(false)),
+      selectedModelProvider.overrideWith(() => _TestSelectedModelNotifier()),
+      lobeHubApiClientProvider.overrideWith((ref) => null),
+      lobeAgentsProvider.overrideWith(
+        () => _TestAgentsNotifier(agentsState ?? const LobeAgentsState()),
+      ),
+      ...overrides,
+    ],
     child: MaterialApp(
-      theme: theme,
+      theme: ThemeData(platform: platform),
       localizationsDelegates: conduitLocalizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
       home: MediaQuery(
@@ -63,9 +168,9 @@ void main() {
       expect(find.byKey(const ValueKey('nav-tab-1')), findsOneWidget);
       expect(find.byKey(const ValueKey('nav-tab-2')), findsOneWidget);
 
-      // Verify Tab 0 (Chats)
+      // Verify Tab 0 (Chats) - active icon is selected chat_bubble
       expect(find.text('Chats'), findsWidgets);
-      expect(find.byIcon(Icons.chat_bubble_outline), findsWidgets);
+      expect(find.byIcon(Icons.chat_bubble), findsWidgets);
 
       // Verify Tab 1 (Agents)
       expect(find.text('Agents'), findsWidgets);
@@ -88,42 +193,32 @@ void main() {
 
       // Chats tab content is rendered and visible
       expect(find.text('Custom Chats Screen'), findsOneWidget);
-      // Agents and Settings pages are in the IndexedStack but not active
-      expect(find.byType(LobeAgentsPage), findsOneWidget);
-      expect(find.byType(LobeSettingsPage), findsOneWidget);
+      // Agents and Settings tabs are in the IndexedStack but offstage
+      expect(
+        find.byKey(const ValueKey('main-nav-tab-agents'), skipOffstage: false),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('main-nav-tab-settings'), skipOffstage: false),
+        findsOneWidget,
+      );
     });
 
     testWidgets('switches seamlessly to Tab 1 (Agents) on tap', (tester) async {
-      final sampleAgent = LobeAgent(
+      final sampleAgent = const LobeAgent(
         id: 'agent-writer',
         title: 'Creative Writer',
         description: 'Assists with creative writing and storytelling.',
         model: 'gpt-4o',
       );
 
-      final container = ProviderContainer(
-        overrides: [
-          lobeAgentsProvider.overrideWith(
-            () => _TestAgentsNotifier(
-              LobeAgentsState(
-                agents: [sampleAgent],
-                isLoading: false,
-              ),
-            ),
-          ),
-        ],
-      );
-      addTearDown(container.dispose);
-
       await tester.pumpWidget(
-        UncontrolledProviderScope(
-          container: container,
-          child: MaterialApp(
-            theme: AppTheme.light(TweakcnThemes.conduit),
-            localizationsDelegates: conduitLocalizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: const MainNavigationShell(),
+        createTestHarness(
+          agentsState: LobeAgentsState(
+            agents: [sampleAgent],
+            isLoading: false,
           ),
+          child: const MainNavigationShell(),
         ),
       );
       await tester.pumpAndSettle();
@@ -133,7 +228,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // Verify Agents page content is visible
-      expect(find.byType(LobeAgentsPage), findsOneWidget);
+      expect(find.byType(LobehubAgentsPage), findsOneWidget);
       expect(find.text('Creative Writer'), findsOneWidget);
       expect(find.text('Assists with creative writing and storytelling.'), findsOneWidget);
       expect(find.text('gpt-4o'), findsOneWidget);
@@ -156,8 +251,6 @@ void main() {
       expect(find.byType(LobeSettingsPage), findsOneWidget);
       expect(find.text('SERVER CONNECTION'), findsOneWidget);
       expect(find.text('APPEARANCE & THEME'), findsOneWidget);
-      expect(find.text('PREFERENCES'), findsOneWidget);
-      expect(find.text('ABOUT'), findsOneWidget);
     });
 
     testWidgets('can switch back and forth between all 3 tabs cleanly', (
@@ -182,7 +275,7 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('nav-tab-1')));
       await tester.pumpAndSettle();
       expect(reportedIndex, 1);
-      expect(find.byType(LobeAgentsPage), findsOneWidget);
+      expect(find.byKey(const ValueKey('main-nav-tab-agents')), findsOneWidget);
 
       // Tap Tab 2 (Settings)
       await tester.tap(find.byKey(const ValueKey('nav-tab-2')));
@@ -276,7 +369,7 @@ void main() {
       // Tap Agents tab in Cupertino
       await tester.tap(find.text('Agents'));
       await tester.pumpAndSettle();
-      expect(find.byType(LobeAgentsPage), findsOneWidget);
+      expect(find.byKey(const ValueKey('main-nav-tab-agents')), findsOneWidget);
 
       // Tap Settings tab in Cupertino
       await tester.tap(find.text('Settings'));
@@ -312,14 +405,33 @@ void main() {
     testWidgets('programmatic navigation updates active tab via mainNavigationIndexProvider', (
       tester,
     ) async {
-      final container = ProviderContainer();
+      final container = ProviderContainer(
+        overrides: [
+          activeServerProvider.overrideWith(
+            (ref) => Future.value(
+              const ServerConfig(
+                id: 'lobehub_self_hosted',
+                name: 'LobeHub',
+                url: 'https://ai.opw.ink',
+              ),
+            ),
+          ),
+          apiServiceProvider.overrideWith((ref) => null),
+          reviewerModeProvider.overrideWith(() => _TestReviewerModeNotifier(false)),
+          selectedModelProvider.overrideWith(() => _TestSelectedModelNotifier()),
+          lobeHubApiClientProvider.overrideWith((ref) => null),
+          lobeAgentsProvider.overrideWith(
+            () => _TestAgentsNotifier(const LobeAgentsState()),
+          ),
+        ],
+      );
       addTearDown(container.dispose);
 
       await tester.pumpWidget(
         UncontrolledProviderScope(
           container: container,
           child: MaterialApp(
-            theme: AppTheme.light(TweakcnThemes.conduit),
+            theme: ThemeData.light(),
             localizationsDelegates: conduitLocalizationsDelegates,
             supportedLocales: AppLocalizations.supportedLocales,
             home: const MainNavigationShell(
@@ -344,14 +456,74 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Settings Tab'), findsOneWidget);
     });
+
+    testWidgets('production MainShell user card -> start -> triggers real binding to topic and selects model', (
+      tester,
+    ) async {
+      final sampleAgent = const LobeAgent(
+        id: 'agent_prod_shell',
+        title: 'Production Agent',
+        description: 'Verified real binding.',
+        model: 'gpt-4o',
+        provider: 'openai',
+      );
+
+      final topicsNotifier = _TestFakeLobeTopicsNotifier();
+      final selectionNotifier = _TestFakeConversationSelection();
+
+      final rosterModels = [
+        const Model(
+          id: 'gpt-4o',
+          name: 'GPT-4o',
+          metadata: {'provider': 'openai'},
+        ),
+      ];
+
+      await tester.pumpWidget(
+        createTestHarness(
+          agentsState: LobeAgentsState(agents: [sampleAgent]),
+          overrides: [
+            lobeTopicsProvider.overrideWith(() => topicsNotifier),
+            conversationSelectionProvider.overrideWith(() => selectionNotifier),
+            modelsProvider.overrideWith(() => _TestModelsNotifier(rosterModels)),
+          ],
+          // Production shell uses default LobeAgentsPage without injected onStartChat
+          child: const MainNavigationShell(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Switch to Agents Tab (Tab 1)
+      await tester.tap(find.byKey(const ValueKey('nav-tab-1')));
+      await tester.pumpAndSettle();
+
+      // Tap on agent card to open bottom sheet
+      await tester.tap(find.byKey(const ValueKey('agent-card-agent_prod_shell')));
+      await tester.pumpAndSettle();
+
+      // Verify the media limitation disclaimer banner is visible immediately
+      expect(
+        find.byKey(const ValueKey('agent-actions-media-notice-banner')),
+        findsOneWidget,
+      );
+
+      // Tap "Start New Chat"
+      await tester.tap(find.byKey(const ValueKey('action-start-new-chat')));
+      await tester.pumpAndSettle();
+
+      // Verify real topic binding occurred
+      expect(topicsNotifier.lastCreatedTopic, isNotNull);
+      expect(topicsNotifier.lastCreatedTopic!.agentId, equals('agent_prod_shell'));
+
+      // Verify conversation selection seam was triggered
+      expect(selectionNotifier.lastSelectedConversation, isNotNull);
+      expect(
+        selectionNotifier.lastSelectedConversation!.metadata['agentId'],
+        equals('agent_prod_shell'),
+      );
+
+      // Verify navigation returned to Tab 0 (Chats)
+      expect(find.byKey(const ValueKey('nav-tab-0')), findsOneWidget);
+    });
   });
-}
-
-class _TestAgentsNotifier extends LobeAgentsNotifier {
-  _TestAgentsNotifier(this._initialState);
-
-  final LobeAgentsState _initialState;
-
-  @override
-  LobeAgentsState build() => _initialState;
 }

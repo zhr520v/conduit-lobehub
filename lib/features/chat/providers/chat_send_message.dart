@@ -1140,10 +1140,14 @@ Future<void> _sendMessageInternal(
   String? messageIdForBuffer;
   OpenWebUiCompletionOwner? submittedOpenWebUiOwner;
   try {
-    final modelItem = _buildLocalModelItem(
+    final rawModelItem = _buildLocalModelItem(
       selectedModel,
       trustedDirectBinding: openWebUiDirectRoute?.binding,
       wireModelId: serverModelId,
+    );
+    final modelItem = ensureModelItemProvider(
+      modelItem: rawModelItem,
+      selectedModel: selectedModel,
     );
     final submittedConversation = activeConversation;
     final submittedOwner = submittedConversation == null
@@ -1273,6 +1277,14 @@ Future<void> _sendMessageInternal(
 
     try {
       requireOpenWebUiPreflightOwner();
+      final lobeAgentId = resolveLobeAgentId(activeConversation);
+      final onPreDispatch = submittedOwner != null
+          ? buildLobeHubAgentPreDispatchCallback(
+              ref,
+              owner: submittedOwner,
+              assistantMessageId: assistantMessageId,
+            )
+          : null;
       final session = await api.sendMessageSession(
         messages: requestMessages,
         model: serverModelId,
@@ -1294,6 +1306,8 @@ Future<void> _sendMessageInternal(
         userMessage: userMessageMap,
         variables: promptVariables,
         files: _extractTopLevelRequestFiles(userMessageMap),
+        lobeAgentId: lobeAgentId,
+        onPreDispatch: onPreDispatch,
       );
 
       if (submittedOwner != null) {

@@ -1,8 +1,9 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:riverpod/misc.dart' show Override;
 
 import 'package:conduit_core/features/lobehub/models/models.dart';
 import 'package:conduit_core/features/lobehub/services/services.dart';
@@ -297,7 +298,7 @@ void main() {
         (_) async => const LobeHealthResponse(service: 'lobehub', status: 'ok'),
       );
       when(() => mockApiClient.getCurrentUser()).thenAnswer(
-        (_) async => const LobeUser(username: 'operator'),
+        (_) async => const LobeUser(id: 'usr_operator', username: 'operator'),
       );
 
       await tester.pumpWidget(

@@ -6,6 +6,8 @@ import 'package:conduit_core/services/api_service.dart';
 import '../services/native_symbol_image_service.dart';
 import 'model_logos.dart';
 
+const _kLobeHubServerId = 'lobehub_self_hosted';
+
 /// Extracts the profile image URL from a model's metadata.
 ///
 /// Note: After OpenWebUI updates, the profile_image_url field is stripped from
@@ -69,6 +71,11 @@ String? deriveModelIcon(Model? model) {
 /// - Provides a fallback favicon.png
 String? buildModelAvatarUrl(ApiService? api, String? modelId) {
   if (api == null || modelId == null || modelId.isEmpty) {
+    return null;
+  }
+
+  // LobeHub does not serve model profile images via OpenWebUI's endpoint.
+  if (api.serverConfig.id == _kLobeHubServerId) {
     return null;
   }
 

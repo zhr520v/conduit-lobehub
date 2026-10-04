@@ -9,9 +9,6 @@ import 'package:riverpod/riverpod.dart';
 import 'package:conduit_core/features/lobehub/models/models.dart';
 import 'package:conduit_core/features/lobehub/services/services.dart';
 import 'package:conduit_core/features/lobehub/providers/providers.dart';
-import 'package:conduit_core/models/chat_message.dart';
-import 'package:conduit_core/models/conversation.dart';
-import 'package:conduit_core/models/model.dart';
 import 'package:conduit_core/ports/secure_key_value_store.dart';
 import 'package:conduit/features/auth/views/lobehub_connection_page.dart';
 
@@ -300,7 +297,16 @@ void main() {
         final (adapter, _, client) = createTestClientEnvironment();
         addTearDown(client.close);
 
-        final notifier = LobeAgentsNotifier(apiClient: client);
+        final container = ProviderContainer(
+          overrides: [
+            lobeAgentsProvider.overrideWith(
+              () => LobeAgentsNotifier(apiClient: client),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final notifier = container.read(lobeAgentsProvider.notifier);
 
         // 2.1 Initial State Check
         expect(notifier.state.agents, isEmpty);
@@ -630,7 +636,10 @@ void main() {
         expect(fromTopicMap.id, equals(originalTopic.id));
         expect(fromTopicMap.title, equals(originalTopic.title));
 
-        final msgMap = lobeMessageToMessageRowMap(originalMessage);
+        final msgMap = lobeMessageToMessageRowMap(
+          originalMessage,
+          chatId: originalTopic.id,
+        );
         final fromMsgMap = messageRowMapToLobeMessage(msgMap);
         expect(fromMsgMap.id, equals(originalMessage.id));
         expect(fromMsgMap.content, equals(originalMessage.content));
@@ -811,10 +820,19 @@ void main() {
         );
         addTearDown(client.close);
 
-        final notifier = LobeAgentsNotifier(
-          apiClient: client,
-          loadCachedAgents: () async => cachedAgents,
+        final container = ProviderContainer(
+          overrides: [
+            lobeAgentsProvider.overrideWith(
+              () => LobeAgentsNotifier(
+                apiClient: client,
+                loadCachedAgents: () async => cachedAgents,
+              ),
+            ),
+          ],
         );
+        addTearDown(container.dispose);
+
+        final notifier = container.read(lobeAgentsProvider.notifier);
 
         await notifier.loadAgents();
 
@@ -984,7 +1002,16 @@ void main() {
         await secureStore.write(key: 'lobehub_username', value: user.username);
 
         // Step 2: Sync Agents & Select DeepSeek R1
-        final agentsNotifier = LobeAgentsNotifier(apiClient: client);
+        final agentsContainer = ProviderContainer(
+          overrides: [
+            lobeAgentsProvider.overrideWith(
+              () => LobeAgentsNotifier(apiClient: client),
+            ),
+          ],
+        );
+        addTearDown(agentsContainer.dispose);
+
+        final agentsNotifier = agentsContainer.read(lobeAgentsProvider.notifier);
         await agentsNotifier.loadAgents();
         expect(agentsNotifier.state.agents.length, equals(3));
 

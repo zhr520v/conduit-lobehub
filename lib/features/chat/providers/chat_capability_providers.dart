@@ -30,6 +30,40 @@ final fileUploadCapableModelsProvider =
       FileUploadCapableModelsNotifier.new,
     );
 
+/// Detailed explanation for why media/vision/file inference is disabled on LobeHub REST.
+///
+/// LobeHub server (version 2.2.17) REST `/api/v1/chat` is string-only / non-stream,
+/// and `/api/v1/responses` strips images. While file upload works separately for storage,
+/// image and file inference is unsupported by server REST regardless of model abilities.
+const String kLobeHubRestMediaUnsupportedNotice =
+    'LobeHub server REST (2.2.17) lacks image and file analysis support (/chat is string-only).';
+
+/// Provider exposing the media capability limitation notice for the active connection,
+/// or null if the active backend has full multimodal capability.
+final activeConnectionMediaLimitationNoticeProvider = Provider<String?>((ref) {
+  if (_isActiveLobeConnection(ref)) {
+    return kLobeHubRestMediaUnsupportedNotice;
+  }
+  return null;
+});
+
+bool _isActiveLobeConnection(dynamic ref) {
+  try {
+    final activeServer = ref.watch(activeServerProvider);
+    final server = activeServer is AsyncValue<ServerConfig?>
+        ? (activeServer.asData?.value)
+        : (activeServer is ServerConfig ? activeServer : null);
+    if (server?.isLobeHub == true) return true;
+  } catch (_) {}
+
+  try {
+    final api = ref.watch(apiServiceProvider);
+    if (api?.serverConfig.isLobeHub == true) return true;
+  } catch (_) {}
+
+  return false;
+}
+
 class AvailableToolsNotifier extends Notifier<List<String>> {
   @override
   List<String> build() => [];
@@ -90,6 +124,13 @@ class VisionCapableModelsNotifier extends Notifier<List<String>> {
       return [];
     }
 
+    // LobeHub server 2.2.17 REST limitation: /chat is string-only and /responses
+    // strips images. Media analysis is unsupported by the server REST layer,
+    // regardless of the underlying model's vision abilities.
+    if (_isActiveLobeConnection(ref)) {
+      return [];
+    }
+
     final directIdentity =
         isLocallyMintedDirectModel(selectedModel) ||
         hasReservedDirectIdentity(selectedModel);
@@ -127,6 +168,12 @@ class FileUploadCapableModelsNotifier extends Notifier<List<String>> {
 
     if (isHermesModel(selectedModel)) {
       return [selectedModel.id];
+    }
+
+    // LobeHub server 2.2.17 REST limitation: while file upload works separately
+    // for storage, file/document inference in chat is unsupported by server REST.
+    if (_isActiveLobeConnection(ref)) {
+      return [];
     }
 
     final directIdentity =

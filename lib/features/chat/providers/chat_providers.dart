@@ -159,6 +159,7 @@ part 'chat_headless_completion.dart';
 part 'chat_hermes_projection_store.dart';
 part 'chat_hermes_replay.dart';
 part 'chat_hermes_turns.dart';
+part 'chat_lobehub_submission.dart';
 part 'chat_message_structure.dart';
 part 'chat_messages_notifier.dart';
 part 'chat_mutation_ownership.dart';

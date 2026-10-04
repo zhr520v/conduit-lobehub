@@ -1,7 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter/cupertino.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -9,8 +8,7 @@ import 'package:conduit_core/features/lobehub/models/lobe_agent.dart';
 import 'package:conduit_core/features/lobehub/providers/lobehub_agents_provider.dart';
 
 import '../../../shared/theme/theme_extensions.dart';
-import '../../../shared/widgets/platform_ui/platform_ui.dart';
-import '../../navigation/views/main_navigation_shell.dart';
+import '../providers/lobehub_chat_start_provider.dart';
 
 /// Predefined vibrant palette for agent avatar initial badge backgrounds.
 const List<Color> _avatarColorPalette = [
@@ -131,9 +129,12 @@ class _LobehubAgentsPageState extends ConsumerState<LobehubAgentsPage> {
           if (widget.onStartChat != null) {
             widget.onStartChat!(selectedAgent);
           } else {
-            try {
-              ref.read(mainNavigationIndexProvider.notifier).state = 0;
-            } catch (_) {}
+            unawaited(
+              ref.read(lobehubChatStartProvider.notifier).startAgentChat(
+                    context: context,
+                    agent: selectedAgent,
+                  ),
+            );
           }
         },
         onViewSystemPrompt: (selectedAgent) {
@@ -601,7 +602,7 @@ class _LobehubAgentsPageState extends ConsumerState<LobehubAgentsPage> {
         vertical: Spacing.sm,
       ),
       itemCount: agents.length,
-      separatorBuilder: (_, __) => const SizedBox(height: Spacing.sm),
+      separatorBuilder: (_, _) => const SizedBox(height: Spacing.sm),
       itemBuilder: (context, index) {
         final agent = agents[index];
         return _AgentListCard(
@@ -1049,27 +1050,20 @@ class _AgentActionsModalSheet extends StatelessWidget {
     final model = agent.model;
     final avatar = agent.avatar;
 
-    return Container(
-      key: const ValueKey('agent-actions-bottom-sheet'),
-      decoration: BoxDecoration(
-        color: theme.surfaceBackground,
-        borderRadius: const BorderRadius.vertical(
-          top: Radius.circular(AppBorderRadius.bottomSheet),
+    return Material(
+      color: theme.surfaceBackground,
+      borderRadius: const BorderRadius.vertical(
+        top: Radius.circular(AppBorderRadius.bottomSheet),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Container(
+        key: const ValueKey('agent-actions-bottom-sheet'),
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.paddingOf(context).bottom + Spacing.md,
         ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.15),
-            blurRadius: 16,
-            offset: const Offset(0, -4),
-          ),
-        ],
-      ),
-      padding: EdgeInsets.only(
-        bottom: MediaQuery.paddingOf(context).bottom + Spacing.md,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
           // Drag handle
           Center(
             child: Container(
@@ -1146,6 +1140,48 @@ class _AgentActionsModalSheet extends StatelessWidget {
           ),
           const SizedBox(height: Spacing.sm),
           Divider(color: theme.dividerColor.withValues(alpha: 0.5), height: 1),
+          // Server REST media capability disclaimer banner
+          Container(
+            key: const ValueKey('agent-actions-media-notice-banner'),
+            margin: const EdgeInsets.symmetric(
+              horizontal: Spacing.md,
+              vertical: Spacing.xs,
+            ),
+            padding: const EdgeInsets.symmetric(
+              horizontal: Spacing.md,
+              vertical: Spacing.xs + 2,
+            ),
+            decoration: BoxDecoration(
+              color: theme.warning.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(AppBorderRadius.md),
+              border: Border.all(
+                color: theme.warning.withValues(alpha: 0.3),
+                width: 1,
+              ),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  Icons.info_outline_rounded,
+                  size: 15,
+                  color: theme.warning,
+                ),
+                const SizedBox(width: Spacing.xs + 2),
+                Expanded(
+                  child: Text(
+                    'Server REST (2.2.17) lacks image and file analysis support (/chat is string-only).',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: theme.warning,
+                      fontWeight: FontWeight.w500,
+                      height: 1.3,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
           const SizedBox(height: Spacing.xs),
           // Action 1: Start New Chat
           ListTile(
@@ -1229,6 +1265,7 @@ class _AgentActionsModalSheet extends StatelessWidget {
           ),
         ],
       ),
-    );
-  }
+    ),
+  );
+}
 }

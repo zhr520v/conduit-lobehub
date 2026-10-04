@@ -1,10 +1,12 @@
 import 'dart:convert';
 
+import 'package:dio/dio.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import 'package:conduit_core/database/app_database.dart';
 import 'package:conduit_core/database/daos/outbox_dao.dart';
 import 'package:conduit_core/database/mappers/conversation_assembler.dart';
+import 'package:conduit_core/models/chat_message.dart';
 
 import 'package:conduit_core/providers/app_providers.dart';
 
@@ -13,6 +15,7 @@ import 'package:conduit_core/services/conversation_parsing.dart';
 import 'package:conduit_core/services/worker_manager.dart';
 
 import 'package:conduit_core/sync/outbox_drainer.dart';
+import 'package:conduit_core/sync/sync_api_client.dart';
 
 import 'package:conduit_core/utils/debug_logger.dart';
 
@@ -180,6 +183,26 @@ class ChatRequestCompletionRunner implements RequestCompletionRunner {
     // another live stream must not prevent collecting the accepted response.
     if (!completionWasSubmitted) {
       deferIfTargetIsBusy();
+      final placeholderPayload = _decodeMessagePayload(placeholder.payload);
+      final placeholderMeta = _asJsonMap(placeholderPayload['metadata']);
+      if (placeholderMeta['terminal'] == true ||
+          (placeholderPayload['error'] != null &&
+              placeholderMeta['completionSubmitted'] != true)) {
+        await db.messagesDao.rearmAssistantCompletion(
+          chatId: chatId,
+          messageId: assistantMessageId,
+        );
+        requireCurrentConversationOwner();
+        if (activeOpenWebUiChatIdForMutation(_ref, owner) != null) {
+          _ref.read(chatMessagesProvider.notifier).updateMessageById(
+            assistantMessageId,
+            (message) => message.copyWith(
+              isStreaming: true,
+              error: null,
+            ),
+          );
+        }
+      }
     }
 
     // 3. Path choice (Option B):
@@ -227,17 +250,53 @@ class ChatRequestCompletionRunner implements RequestCompletionRunner {
     final targetIsActive =
         activeOpenWebUiChatIdForMutation(_ref, owner) != null;
 
-    if (targetIsActive &&
-        _ref
-            .read(chatMessagesProvider)
-            .any((message) => message.id == assistantMessageId)) {
-      // Live drive — the placeholder is loaded + marked streaming inside
-      // runQueuedCompletion; the stream final + D-07 echo land on the SAME
-      // assistantMessageId row (R8 one-row-per-turn).
-      await runQueuedCompletion(
+    try {
+      if (targetIsActive &&
+          _ref
+              .read(chatMessagesProvider)
+              .any((message) => message.id == assistantMessageId)) {
+        // Live drive — the placeholder is loaded + marked streaming inside
+        // runQueuedCompletion; the stream final + D-07 echo land on the SAME
+        // assistantMessageId row (R8 one-row-per-turn).
+        await runQueuedCompletion(
+          _ref,
+          chatId: chatId,
+          assistantMessageId: assistantMessageId,
+          model: decoded.model,
+          toolIds: decoded.toolIds,
+          filterIds: decoded.filterIds,
+          terminalId: decoded.terminalId,
+          enableWebSearch: decoded.enableWebSearch,
+          enableImageGeneration: decoded.enableImageGeneration,
+          isVoiceMode: decoded.isVoiceMode,
+          sessionIdOverride: decoded.sessionIdOverride,
+          completionOwner: owner,
+        );
+        return;
+      }
+
+      // Headless drive — no active-conversation switch, no chatMessagesProvider
+      // mutation. Builds the request from this chat's DB rows.
+      final rows = await db.messagesDao.getForChat(chatId);
+      requireCurrentConversationOwner();
+      final conversation = await assembleConversationGuarded(
+        chatRow,
+        rows,
+        offload: (envelope) => _ref
+            .read(workerManagerProvider)
+            .schedule(
+              parseFullConversationModelWorker,
+              envelope,
+              debugLabel: 'headless.assembleConversation',
+            ),
+      );
+      requireCurrentConversationOwner();
+      await runHeadlessCompletion(
         _ref,
         chatId: chatId,
         assistantMessageId: assistantMessageId,
+        messages: conversation.messages,
+        conversation: conversation,
         model: decoded.model,
         toolIds: decoded.toolIds,
         filterIds: decoded.filterIds,
@@ -248,50 +307,169 @@ class ChatRequestCompletionRunner implements RequestCompletionRunner {
         sessionIdOverride: decoded.sessionIdOverride,
         completionOwner: owner,
       );
+    } catch (error) {
+      if (_isTerminalCompletionError(error)) {
+        await _settleTerminalPreSubmissionFailure(
+          chatId: chatId,
+          assistantMessageId: assistantMessageId,
+          error: error,
+          owner: owner,
+          session: ownedConversationSession,
+        );
+        throw _asTerminalCompletionException(error);
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> _settleTerminalPreSubmissionFailure({
+    required String chatId,
+    required String assistantMessageId,
+    required Object error,
+    required OpenWebUiCompletionOwner owner,
+    required OpenWebUiConversationReadSnapshot session,
+  }) async {
+    if (!openWebUiConversationReadIsCurrent(_ref, session) ||
+        !openWebUiCompletionContextIsCurrent(_ref, owner)) {
+      throw const CompletionDatabaseUnavailableException();
+    }
+    final db = owner.database;
+    if (db == null) return;
+
+    final current = await db.messagesDao.getMessage(chatId, assistantMessageId);
+    if (current != null && _placeholderMarkedSubmitted(current)) {
       return;
     }
 
-    // Headless drive — no active-conversation switch, no chatMessagesProvider
-    // mutation. Builds the request from this chat's DB rows.
-    final rows = await db.messagesDao.getForChat(chatId);
-    requireCurrentConversationOwner();
-    final conversation = await assembleConversationGuarded(
-      chatRow,
-      rows,
-      offload: (envelope) => _ref
-          .read(workerManagerProvider)
-          .schedule(
-            parseFullConversationModelWorker,
-            envelope,
-            debugLabel: 'headless.assembleConversation',
-          ),
-    );
-    requireCurrentConversationOwner();
-    await runHeadlessCompletion(
-      _ref,
+    final errorMessage = _cleanErrorMessage(error);
+
+    await db.messagesDao.markAssistantCompletionPreSubmissionFailed(
       chatId: chatId,
-      assistantMessageId: assistantMessageId,
-      messages: conversation.messages,
-      conversation: conversation,
-      model: decoded.model,
-      toolIds: decoded.toolIds,
-      filterIds: decoded.filterIds,
-      terminalId: decoded.terminalId,
-      enableWebSearch: decoded.enableWebSearch,
-      enableImageGeneration: decoded.enableImageGeneration,
-      isVoiceMode: decoded.isVoiceMode,
-      sessionIdOverride: decoded.sessionIdOverride,
-      completionOwner: owner,
+      messageId: assistantMessageId,
+      error: errorMessage,
     );
+
+    if (activeOpenWebUiChatIdForMutation(_ref, owner) != null) {
+      _ref.read(chatMessagesProvider.notifier).updateMessageById(
+        assistantMessageId,
+        (message) => message.copyWith(
+          isStreaming: false,
+          error: ChatMessageError(content: errorMessage),
+        ),
+      );
+    }
   }
 }
 
 bool _placeholderMarkedComplete(MessageRow placeholder) {
   final payload = _decodeMessagePayload(placeholder.payload);
   final metadata = _asJsonMap(payload['metadata']);
+  if (metadata['terminal'] == true ||
+      (payload['error'] != null && metadata['completionSubmitted'] != true)) {
+    return false;
+  }
   return metadata['responseDone'] == true ||
       payload['done'] == true ||
       payload['isStreaming'] == false;
+}
+
+bool _isTerminalCompletionError(Object error) {
+  if (error is SyncTerminalException) {
+    final status = error.statusCode;
+    return status == null || status == 400 || status == 401 || status == 403;
+  }
+  if (error is DioException) {
+    final status = error.response?.statusCode;
+    return status == 400 || status == 401 || status == 403;
+  }
+  return false;
+}
+
+SyncTerminalException _asTerminalCompletionException(Object error) {
+  if (error is SyncTerminalException) {
+    return error;
+  }
+  if (error is DioException) {
+    final status = error.response?.statusCode ?? 400;
+    return SyncTerminalException(
+      statusCode: status,
+      message: _cleanErrorMessage(error, defaultStatus: status),
+    );
+  }
+  return SyncTerminalException(
+    statusCode: 400,
+    message: _cleanErrorMessage(error, defaultStatus: 400),
+  );
+}
+
+String _cleanErrorMessage(Object error, {int? defaultStatus}) {
+  if (error is SyncTerminalException) {
+    final msg = error.message.trim();
+    if (msg.isNotEmpty && !_looksLikeStackTraceOrCredential(msg)) {
+      return msg;
+    }
+    return _fallbackMessageForStatus(error.statusCode ?? defaultStatus);
+  }
+  if (error is DioException) {
+    final data = error.response?.data;
+    if (data is Map) {
+      final msg = _extractStringFromMap(data);
+      if (msg != null &&
+          msg.isNotEmpty &&
+          !_looksLikeStackTraceOrCredential(msg)) {
+        return msg;
+      }
+    } else if (data is String &&
+        data.isNotEmpty &&
+        !_looksLikeStackTraceOrCredential(data)) {
+      return data.trim();
+    }
+    return _fallbackMessageForStatus(
+      error.response?.statusCode ?? defaultStatus,
+    );
+  }
+  return _fallbackMessageForStatus(defaultStatus);
+}
+
+bool _looksLikeStackTraceOrCredential(String text) {
+  final lower = text.toLowerCase();
+  if (lower.contains('bearer ') ||
+      lower.contains('sk-') ||
+      lower.contains('token=') ||
+      lower.contains('password') ||
+      lower.contains('#0 ') ||
+      lower.contains('stack trace:')) {
+    return true;
+  }
+  return false;
+}
+
+String _fallbackMessageForStatus(int? status) {
+  switch (status) {
+    case 400:
+      return 'The request was rejected by the model service (unsupported content or format).';
+    case 401:
+      return 'Authentication failed. Please verify your credentials.';
+    case 403:
+      return 'Access forbidden. You do not have permission to access this model.';
+    default:
+      return 'The request could not be completed.';
+  }
+}
+
+String? _extractStringFromMap(Map data) {
+  final detail = data['detail'];
+  if (detail is String) return detail.trim();
+  final error = data['error'];
+  if (error is Map) {
+    final msg = error['message'] ?? error['content'];
+    if (msg is String) return msg.trim();
+  } else if (error is String) {
+    return error.trim();
+  }
+  final message = data['message'];
+  if (message is String) return message.trim();
+  return null;
 }
 
 bool _placeholderMarkedSubmitted(MessageRow placeholder) {

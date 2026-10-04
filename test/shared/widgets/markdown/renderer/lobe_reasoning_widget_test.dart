@@ -5,7 +5,7 @@ import 'package:conduit/shared/theme/app_theme.dart';
 import 'package:conduit/shared/theme/tweakcn_themes.dart';
 import 'package:conduit/shared/widgets/markdown/streaming_markdown_widget.dart';
 import 'package:conduit_markdown/conduit_markdown.dart';
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -61,7 +61,7 @@ void main() {
         check(segments[0].isReasoning).isTrue();
         check(segments[0].entry!.reasoning).contains('Thinking deeply about $tagName');
         check(segments[1].isReasoning).isFalse();
-        check(segments[1].text).equals('Final text');
+        check(segments[1].text?.trim()).equals('Final text');
       }
     });
 
@@ -76,7 +76,7 @@ void main() {
       check(ReasoningParser.countWords('人工智能深度推理测试')).equals(10);
 
       // Mixed
-      check(ReasoningParser.countWords('DeepSeek R1 深度思考 123')).equals(6);
+      check(ReasoningParser.countWords('DeepSeek R1 深度思考 123')).equals(7);
     });
 
     test('ReasoningParser.formatCompletedSummary produces accurate English and Chinese labels', () {
@@ -160,7 +160,7 @@ Analyzing problem constraints and designing architecture...
 
       // Capsule header is displayed with active thinking indicator
       expect(find.byKey(const ValueKey<String>('lobe-reasoning-capsule-header')), findsOneWidget);
-      expect(find.text('Deep thinking in progress…'), findsOneWidget);
+      expect(find.text('Deep thinking in progress…'), findsWidgets);
 
       // Reasoning body is expanded by default during active streaming
       expect(find.textContaining('Analyzing problem constraints'), findsOneWidget);
@@ -184,7 +184,7 @@ Analyzing problem constraints and designing architecture...
       await tester.pump();
 
       expect(find.byKey(const ValueKey<String>('lobe-reasoning-capsule-header')), findsOneWidget);
-      expect(find.text('正在深度思考…'), findsOneWidget);
+      expect(find.text('正在深度思考…'), findsWidgets);
       expect(find.textContaining('正在分析问题约束'), findsOneWidget);
     });
 

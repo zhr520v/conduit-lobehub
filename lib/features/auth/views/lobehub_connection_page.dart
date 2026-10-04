@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -217,7 +217,9 @@ class _LobeHubConnectionPageState extends ConsumerState<LobeHubConnectionPage> {
       if (msg.contains('404') ||
           msg.contains('not found') ||
           msg.contains('connection') ||
-          msg.contains('timeout')) {
+          msg.contains('timeout') ||
+          msg.contains('failed host lookup') ||
+          msg.contains('socketexception')) {
         return 'Unable to connect to server';
       }
       return error.message;

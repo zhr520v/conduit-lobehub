@@ -1,7 +1,8 @@
-import 'package:flutter/material.dart' hide ThemeMode;
-import 'package:material_ui/material_ui.dart' show ThemeMode;
+import 'package:flutter/material.dart' as flutter_material;
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:riverpod/misc.dart' show Override;
 
 import 'package:conduit/features/lobehub/views/lobehub_settings_page.dart';
 import 'package:conduit/features/settings/views/lobe_settings_page.dart';
@@ -10,6 +11,13 @@ import 'package:conduit/l10n/conduit_localizations.dart';
 import 'package:conduit/shared/theme/app_theme.dart';
 import 'package:conduit/shared/theme/tweakcn_themes.dart';
 import 'package:conduit/shared/widgets/platform_ui/platform_ui.dart';
+
+void _setTallViewport(WidgetTester tester) {
+  tester.view.physicalSize = const Size(800, 2400);
+  tester.view.devicePixelRatio = 1.0;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+}
 
 Widget createTestHarness({
   required Widget child,
@@ -25,12 +33,14 @@ Widget createTestHarness({
       theme: theme,
       localizationsDelegates: conduitLocalizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
-      home: MediaQuery(
-        data: MediaQueryData(size: size),
-        child: SizedBox(
-          width: size.width,
-          height: size.height,
-          child: child,
+      home: flutter_material.ScaffoldMessenger(
+        child: MediaQuery(
+          data: MediaQueryData(size: size),
+          child: SizedBox(
+            width: size.width,
+            height: size.height,
+            child: child,
+          ),
         ),
       ),
     ),
@@ -250,6 +260,7 @@ void main() {
     testWidgets('Cancel path leaves cache intact without calling clear or showing toast', (
       tester,
     ) async {
+      _setTallViewport(tester);
       bool clearCacheCalled = false;
 
       await tester.pumpWidget(
@@ -263,11 +274,12 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('DATA & STORAGE'), findsOneWidget);
-
       final clearCacheBtn = find.byKey(
         const Key('lobehub-clear-cache-button'),
       );
+      await tester.scrollUntilVisible(clearCacheBtn, 200);
+
+      expect(find.text('DATA & STORAGE'), findsOneWidget);
       expect(clearCacheBtn, findsOneWidget);
 
       // Tap button to open dialog
@@ -301,6 +313,7 @@ void main() {
     testWidgets('Confirm path triggers clear callback and shows success toast', (
       tester,
     ) async {
+      _setTallViewport(tester);
       bool clearCacheCalled = false;
 
       await tester.pumpWidget(
@@ -317,6 +330,7 @@ void main() {
       final clearCacheBtn = find.byKey(
         const Key('lobehub-clear-cache-button'),
       );
+      await tester.scrollUntilVisible(clearCacheBtn, 200);
       await tester.tap(clearCacheBtn);
       await tester.pumpAndSettle();
 
@@ -347,6 +361,7 @@ void main() {
     testWidgets('renders all about section information accurately', (
       tester,
     ) async {
+      _setTallViewport(tester);
       await tester.pumpWidget(
         createTestHarness(
           child: const LobehubSettingsPage(
@@ -357,6 +372,8 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+
+      await tester.scrollUntilVisible(find.text('ABOUT'), 200);
 
       // Verify About section exists
       expect(find.text('ABOUT'), findsOneWidget);
@@ -395,6 +412,7 @@ void main() {
     testWidgets('LobeSettingsPage typedef creates LobehubSettingsPage seamlessly', (
       tester,
     ) async {
+      _setTallViewport(tester);
       await tester.pumpWidget(
         createTestHarness(
           child: const LobeSettingsPage(),
@@ -407,8 +425,11 @@ void main() {
       expect(find.text('SERVER CONNECTION'), findsOneWidget);
       expect(find.text('APPEARANCE & THEME'), findsOneWidget);
       expect(find.text('TYPOGRAPHY & FONT SIZE'), findsOneWidget);
+      await tester.scrollUntilVisible(find.text('DATA & STORAGE'), 200);
       expect(find.text('DATA & STORAGE'), findsOneWidget);
+      await tester.scrollUntilVisible(find.text('PREFERENCES'), 200);
       expect(find.text('PREFERENCES'), findsOneWidget);
+      await tester.scrollUntilVisible(find.text('ABOUT'), 200);
       expect(find.text('ABOUT'), findsOneWidget);
     });
   });

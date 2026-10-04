@@ -93,10 +93,20 @@ Future<void> runQueuedCompletion(
   );
   requireActiveOwner();
 
-  final Map<String, dynamic> modelItem =
+  final rawModelItem =
       (selectedModel != null && selectedModel.id == effectiveModelId)
       ? _buildLocalModelItem(selectedModel)
       : <String, dynamic>{'id': effectiveModelId, 'name': effectiveModelId};
+  final Map<String, dynamic> modelItem = ensureModelItemProvider(
+    modelItem: rawModelItem,
+    selectedModel: selectedModel,
+  );
+  final lobeAgentId = resolveLobeAgentId(activeConversation);
+  final onPreDispatch = buildLobeHubAgentPreDispatchCallback(
+    ref,
+    owner: owner,
+    assistantMessageId: assistantMessageId,
+  );
 
   final socketService = _readOpenWebUiSocketForApi(ref, api);
   final socketSessionId =
@@ -182,6 +192,8 @@ Future<void> runQueuedCompletion(
       userMessage: parentMsgMap,
       variables: promptVars2,
       files: _extractTopLevelRequestFiles(parentMsgMap),
+      lobeAgentId: lobeAgentId,
+      onPreDispatch: onPreDispatch,
     );
     await _markAcceptedOpenWebUiCompletionOrAbort(
       ref,
@@ -347,10 +359,20 @@ Future<void> runHeadlessCompletion(
   );
   requireCurrentOwner();
 
-  final modelItem =
+  final rawModelItem =
       (selectedModel != null && selectedModel.id == effectiveModelId)
       ? _buildLocalModelItem(selectedModel)
       : <String, dynamic>{'id': effectiveModelId, 'name': effectiveModelId};
+  final modelItem = ensureModelItemProvider(
+    modelItem: rawModelItem,
+    selectedModel: selectedModel,
+  );
+  final lobeAgentId = resolveLobeAgentId(conversation);
+  final onPreDispatch = buildLobeHubAgentPreDispatchCallback(
+    ref,
+    owner: owner,
+    assistantMessageId: assistantMessageId,
+  );
 
   final socketService = _readOpenWebUiSocketForApi(ref, api);
   final socketSessionId =
@@ -422,6 +444,8 @@ Future<void> runHeadlessCompletion(
     userMessage: parentMsgMap,
     variables: promptVars,
     files: _extractTopLevelRequestFiles(parentMsgMap),
+    lobeAgentId: lobeAgentId,
+    onPreDispatch: onPreDispatch,
   );
   await _markAcceptedOpenWebUiCompletionOrAbort(
     ref,
@@ -562,6 +586,21 @@ Future<bool?> _pullSubmittedOpenWebUiCompletion(
   required String assistantMessageId,
   int attempts = 6,
   Duration delay = const Duration(seconds: 2),
+}) =>
+    _pullSubmittedOpenWebUiAssistantSnapshot(
+      ref,
+      owner: owner,
+      assistantMessageId: assistantMessageId,
+      attempts: attempts,
+      delay: delay,
+    );
+
+Future<bool?> _pullSubmittedOpenWebUiAssistantSnapshot(
+  dynamic ref, {
+  required OpenWebUiCompletionOwner owner,
+  required String assistantMessageId,
+  int attempts = 6,
+  Duration delay = const Duration(seconds: 2),
 }) async {
   final chatId = owner.chatId;
   if (!openWebUiCompletionContextIsCurrent(ref, owner)) {
@@ -572,6 +611,59 @@ Future<bool?> _pullSubmittedOpenWebUiCompletion(
     );
     return null;
   }
+
+  // LobeHub submitted recovery: reconcile persisted correlation before pulling
+  final db = owner.database;
+  if (db != null) {
+    try {
+      final existingRow = await db.messagesDao.getMessage(
+        owner.chatId,
+        assistantMessageId,
+      );
+      if (existingRow != null) {
+        final payload = _decodeMessagePayload(existingRow.payload);
+        final metadata = _asJsonMap(payload['metadata']);
+        final correlationData = metadata['lobeAgentCorrelation'];
+        if (correlationData != null && correlationData is Map) {
+          final api = owner.api;
+          if (api is ApiService && api.serverConfig.isLobeHub) {
+            final correlation = LobeAgentCorrelation.fromJson(
+              Map<String, dynamic>.from(correlationData),
+            );
+            final reconcileResult = await api.reconcileAgentTurn(correlation);
+            if (reconcileResult.ambiguous) {
+              DebugLogger.error(
+                'LobeHub reconciliation ambiguous for chat $chatId, message $assistantMessageId: ${reconcileResult.errorMessage}',
+                scope: 'chat/completion',
+              );
+              // Ambiguity must visibly fail and NEVER re-POST
+              await db.messagesDao.markAssistantCompletionRecoveryFailed(
+                chatId: owner.chatId,
+                messageId: assistantMessageId,
+                error:
+                    'LobeHub reconciliation ambiguous: ${reconcileResult.errorMessage ?? "multiple matching messages found"}',
+              );
+              return false;
+            }
+            if (!reconcileResult.success) {
+              DebugLogger.log(
+                'LobeHub reconciliation not yet successful: ${reconcileResult.errorMessage}',
+                scope: 'chat/completion',
+              );
+            }
+          }
+        }
+      }
+    } catch (e, st) {
+      DebugLogger.error(
+        'LobeHub correlation reconciliation failed during recovery: $e',
+        scope: 'chat/completion',
+        error: e,
+        stackTrace: st,
+      );
+    }
+  }
+
   // Pull the chat (bounded) until the server-persisted assistant reply lands
   // locally. The Phase 3 merge applies it under the chat lock. Both transport
   // flows persist the assistant message ASYNCHRONOUSLY (the server defaults

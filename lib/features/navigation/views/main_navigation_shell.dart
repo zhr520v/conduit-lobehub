@@ -8,9 +8,9 @@ import '../../../core/services/haptic_service.dart';
 import '../../../l10n/app_localizations.dart';
 import '../../../shared/theme/theme_extensions.dart';
 import '../../../shared/widgets/platform_ui/platform_ui.dart';
+import '../../lobehub/providers/lobehub_chat_start_provider.dart';
 import '../../lobehub/views/lobehub_agents_page.dart';
 import '../../settings/views/lobe_settings_page.dart';
-import '../widgets/chats_drawer.dart';
 
 export '../../lobehub/views/lobehub_agents_page.dart';
 
@@ -22,6 +22,7 @@ class MainNavigationIndexNotifier extends Notifier<int> {
   @override
   int build() => 0;
 
+  @override
   set state(int value) => super.state = value;
 }
 
@@ -48,25 +49,24 @@ class MainNavigationTabItem {
   final String selectedSfSymbol;
 }
 
-/// Fallback chats tab widget when [AppLocalizations] is not initialized in tests.
+/// Fallback chats tab widget when [chatsView] is not provided.
 class _DefaultChatsView extends StatelessWidget {
   const _DefaultChatsView();
 
   @override
   Widget build(BuildContext context) {
-    if (AppLocalizations.of(context) != null) {
-      return const ChatsDrawer();
-    }
     final theme = context.conduitTheme;
+    final l10n = AppLocalizations.of(context);
+    final title = l10n?.sidebarChatsTab ?? 'Chats';
     return Scaffold(
       backgroundColor: theme.surfaceBackground,
       appBar: AppBar(
-        title: const Text('Chats'),
+        title: Text(title),
         backgroundColor: theme.surfaceBackground,
         elevation: 0,
       ),
-      body: const Center(
-        child: Text('Chats'),
+      body: Center(
+        child: Text(title),
       ),
     );
   }
@@ -188,7 +188,17 @@ class _MainNavigationShellState extends ConsumerState<MainNavigationShell> {
 
     final chatsWidget =
         widget.chatsView ?? widget.child ?? const _DefaultChatsView();
-    final agentsWidget = widget.agentsView ?? const LobeAgentsPage();
+    final agentsWidget = widget.agentsView ??
+        LobehubAgentsPage(
+          onStartChat: (agent) {
+            unawaited(
+              ref.read(lobehubChatStartProvider.notifier).startAgentChat(
+                    context: context,
+                    agent: agent,
+                  ),
+            );
+          },
+        );
     final settingsWidget = widget.settingsView ?? const LobeSettingsPage();
 
     return LayoutBuilder(
@@ -235,7 +245,8 @@ class _MainNavigationShellState extends ConsumerState<MainNavigationShell> {
     int selectedIndex,
     bool isSmallScreen,
   ) {
-    final usesCupertino = context.usesCupertinoChrome;
+    final usesCupertino =
+        context.usesCupertinoChrome || PlatformUiCapabilities.isIOS;
 
     if (usesCupertino) {
       return CupertinoTabBar(
