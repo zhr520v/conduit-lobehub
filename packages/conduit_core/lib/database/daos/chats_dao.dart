@@ -345,6 +345,9 @@ class ChatsDao extends DatabaseAccessor<AppDatabase> with _$ChatsDaoMixin {
     final serverChat = server.chat;
     return transaction(() async {
       final existing = await getChat(serverChat.id);
+      if (existing != null && !existing.deleted) {
+        server = await _preserveUnresolvedRows(server, existing);
+      }
       // Null is omitted metadata; an explicit empty map clears server tags.
       final resolvedMeta = meta ?? _decodeMeta(existing?.meta ?? '{}');
 
@@ -532,6 +535,88 @@ class ChatsDao extends DatabaseAccessor<AppDatabase> with _$ChatsDaoMixin {
     });
   }
 
+  Future<ChatRows> _preserveUnresolvedRows(
+    ChatRows server,
+    ChatRow existing,
+  ) async {
+    final localMessages = await attachedDatabase.messagesDao.getForChat(
+      existing.id,
+    );
+    final isLobeHub = _isLobeHubChat(
+      _decodeMeta(existing.meta),
+      _decodeMeta(existing.rawExtra),
+    );
+    final protectedIds = <String>{};
+    final activeOps = await (select(_outboxDao.outboxOps)
+          ..where((op) =>
+              op.chatId.equals(existing.id) &
+              op.kind.equals(OutboxKind.requestCompletion.name)))
+        .get();
+    for (final op in activeOps) {
+      if (op.kind == OutboxKind.requestCompletion.name) {
+        final assistantId = _requestCompletionAssistantId(op.payload);
+        if (assistantId != null) protectedIds.add(assistantId);
+      }
+    }
+    for (final message in localMessages) {
+      if (message.role != 'assistant') continue;
+      final payload = _decodeMeta(message.payload);
+      final metadata = payload['metadata'] ?? payload['meta'];
+      if (metadata is Map &&
+          (metadata['lobeAgentCorrelation'] is Map ||
+              (isLobeHub && metadata['terminal'] == true &&
+                  payload['error'] != null) ||
+              (metadata['completionSubmitted'] == true &&
+                  metadata['responseDone'] != true)) &&
+          metadata['serverMessageId'] == null) {
+        protectedIds.add(message.id);
+      }
+    }
+    for (final message in localMessages) {
+      if (protectedIds.contains(message.id) && message.parentId != null) {
+        protectedIds.add(message.parentId!);
+      }
+    }
+    final serverIds = {for (final message in server.messages) message.id};
+    protectedIds.removeAll(serverIds);
+    if (protectedIds.isEmpty) return server;
+    final preserved = mergeChat(
+      server: server,
+      local: chatRowsFromDb(existing, localMessages),
+      base: server.chat.updatedAt - 1,
+      chatEnvelopeDirty: false,
+      dirtyMessageIds: protectedIds,
+    ).merged;
+    final chat = server.chat;
+    final hasLobeHubBranch = isLobeHub &&
+        preserved.chat.currentMessageId != null &&
+        preserved.messages.any(
+          (message) => message.id == preserved.chat.currentMessageId,
+        );
+    return ChatRows(
+      chat: ChatRowData(
+        id: chat.id,
+        title: chat.title,
+        folderId: chat.folderId,
+        pinned: chat.pinned,
+        archived: chat.archived,
+        currentMessageId: preserved.chat.currentMessageId,
+        createdAt: chat.createdAt,
+        updatedAt: chat.updatedAt,
+        rawExtra: chat.rawExtra,
+      ),
+      messages: preserved.messages,
+      unmappableMessages: server.unmappableMessages,
+      unmappableMessageOrder: server.unmappableMessageOrder,
+      blobHadTitle: server.blobHadTitle,
+      blobTitleValue: server.blobTitleValue,
+      blobHadHistory: server.blobHadHistory || hasLobeHubBranch,
+      historyHadMessages: server.historyHadMessages || hasLobeHubBranch,
+      historyHadCurrentId: preserved.historyHadCurrentId || hasLobeHubBranch,
+      historyExtra: server.historyExtra,
+    );
+  }
+
   static Map<String, dynamic> _decodeMeta(String stored) {
     try {
       final decoded = jsonDecode(stored);
@@ -540,6 +625,24 @@ class ChatsDao extends DatabaseAccessor<AppDatabase> with _$ChatsDaoMixin {
       return const {};
     }
   }
+
+  static bool _isLobeHubChat(
+    Map<String, dynamic> meta,
+    Map<String, dynamic> rawExtra,
+  ) {
+    final metadata = rawExtra['metadata'];
+    return meta['backend'] == 'lobehub' ||
+        (metadata is Map && metadata['backend'] == 'lobehub');
+  }
+
+  static Map<String, dynamic> _withActiveBranch(
+    Map<String, dynamic> blobMeta,
+  ) => <String, dynamic>{
+    ...blobMeta,
+    'blobHadHistory': true,
+    'historyHadMessages': true,
+    'historyHadCurrentId': true,
+  };
 
   /// Caller is inside [mergeServerChat]'s transaction. Writes the server's
   /// `meta` and share id over the stored ones when they differ.
@@ -614,6 +717,10 @@ class ChatsDao extends DatabaseAccessor<AppDatabase> with _$ChatsDaoMixin {
   }) async {
     final chat = rows.chat;
     final mergedLastReadAt = _maxLastReadAt(existingLastReadAt, listLastReadAt);
+    final blobMeta = blobMetaJson(rows);
+    final hasLobeHubBranch = _isLobeHubChat(meta, chat.rawExtra) &&
+        chat.currentMessageId != null &&
+        rows.messages.any((message) => message.id == chat.currentMessageId);
 
     await into(chats).insertOnConflictUpdate(
       ChatsCompanion.insert(
@@ -630,7 +737,9 @@ class ChatsDao extends DatabaseAccessor<AppDatabase> with _$ChatsDaoMixin {
         deleted: const Value(false),
         bodySynced: const Value(true),
         rawExtra: Value(jsonEncode(chat.rawExtra)),
-        blobMeta: Value(jsonEncode(blobMetaJson(rows))),
+        blobMeta: Value(jsonEncode(
+          hasLobeHubBranch ? _withActiveBranch(blobMeta) : blobMeta,
+        )),
         shareId: Value(shareId),
         userId: Value(userId),
         meta: Value(jsonEncode(meta)),
@@ -1219,11 +1328,17 @@ class ChatsDao extends DatabaseAccessor<AppDatabase> with _$ChatsDaoMixin {
         );
       }
 
+      final chat = currentMessageId == null ? null : await getChat(chatId);
+      final hasLobeHubBranch = chat != null &&
+          _isLobeHubChat(_decodeMeta(chat.meta), _decodeMeta(chat.rawExtra));
       await (update(chats)..where((t) => t.id.equals(chatId))).write(
         ChatsCompanion(
           currentMessageId: currentMessageId == null
               ? const Value.absent()
               : Value(currentMessageId),
+          blobMeta: hasLobeHubBranch
+              ? Value(jsonEncode(_withActiveBranch(_decodeMeta(chat.blobMeta))))
+              : const Value.absent(),
           updatedAt: updatedAt == null
               ? const Value.absent()
               : Value(updatedAt),
