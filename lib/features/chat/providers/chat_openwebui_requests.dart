@@ -533,7 +533,9 @@ Future<List<Map<String, dynamic>>?> _resolveToolServersForRequest({
 /// rebuild the live conversation history (skip archived/non-history rows,
 /// sanitize content, merge attachment/file/output payloads), prepend the
 /// effective system message (conversation prompt, falling back to the user
-/// prompt) when one is absent, then apply [_buildChatCompletionMessages].
+/// prompt) when one is absent, then apply the backend's history policy.
+/// LobeHub raw inference consumes this history; durable Open WebUI requests
+/// leave non-system history reconstruction to the server.
 Future<List<Map<String, dynamic>>> _buildCompletionRequestMessages({
   required dynamic api,
   required List<ChatMessage> messages,
@@ -592,6 +594,12 @@ Future<List<Map<String, dynamic>>> _buildCompletionRequestMessages({
     }
   }
 
+  if (api is ApiService && api.serverConfig.isLobeHub) {
+    return conversationMessages
+        .map((message) => Map<String, dynamic>.from(message))
+        .toList(growable: false);
+  }
+
   return _buildChatCompletionMessages(
     conversationMessages: conversationMessages,
     isTemporary: isTemporary,
@@ -602,12 +610,16 @@ Future<List<Map<String, dynamic>>> _buildCompletionRequestMessages({
 Future<List<Map<String, dynamic>>>
 buildOpenWebUiCompletionRequestMessagesForTest({
   required List<ChatMessage> messages,
+  ApiService? api,
+  String? conversationSystemPrompt,
+  String? userSystemPrompt,
+  bool isTemporary = true,
 }) => _buildCompletionRequestMessages(
-  api: null,
+  api: api,
   messages: messages,
-  conversationSystemPrompt: null,
-  userSystemPrompt: null,
-  isTemporary: true,
+  conversationSystemPrompt: conversationSystemPrompt,
+  userSystemPrompt: userSystemPrompt,
+  isTemporary: isTemporary,
 );
 
 /// Last `user`-role message id in [messages], scanning newest-first; `null`
