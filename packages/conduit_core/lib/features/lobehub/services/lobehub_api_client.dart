@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:collection/collection.dart';
 import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
 import 'package:meta/meta.dart';
@@ -144,7 +143,7 @@ class LobeAuthInterceptor extends Interceptor {
 /// - Dual auth header injection (`Authorization: Bearer <key>` and `X-API-Key: <key>`).
 /// - Automatic translation of HTTP status codes into typed [LobeHubException]s.
 /// - Full CRUD support for Agents, Topics, and Messages.
-/// - Flexible list deserialization handling direct lists and wrapped `{data: [...]}`.
+/// - List deserialization handling direct, legacy wrapped, and nested collections.
 class LobeHubApiClient {
   /// Creates a [LobeHubApiClient].
   ///
@@ -306,10 +305,8 @@ class LobeHubApiClient {
       queryParameters: queryParameters,
     );
 
-    return _extractList(data)
-        .map((item) =>
-            item is Map ? LobeAgent.fromJson(Map<String, dynamic>.from(item)) : null)
-        .whereNotNull()
+    return _extractList(data, 'agents')
+        .map(LobeAgent.fromJson)
         .toList();
   }
 
@@ -368,10 +365,8 @@ class LobeHubApiClient {
       queryParameters: queryParameters,
     );
 
-    return _extractList(data)
-        .map((item) =>
-            item is Map ? LobeTopic.fromJson(Map<String, dynamic>.from(item)) : null)
-        .whereNotNull()
+    return _extractList(data, 'topics')
+        .map(LobeTopic.fromJson)
         .toList();
   }
 
@@ -449,10 +444,8 @@ class LobeHubApiClient {
       queryParameters: queryParameters,
     );
 
-    return _extractList(data)
-        .map((item) =>
-            item is Map ? LobeMessage.fromJson(Map<String, dynamic>.from(item)) : null)
-        .whereNotNull()
+    return _extractList(data, 'messages')
+        .map(LobeMessage.fromJson)
         .toList();
   }
 
@@ -678,31 +671,47 @@ class LobeHubApiClient {
     return <String, dynamic>{};
   }
 
-  static List<dynamic> _extractList(dynamic responseData) {
-    if (responseData is List) {
-      return responseData;
-    }
+  static List<Map<String, dynamic>> _extractList(
+    dynamic responseData,
+    String collectionKey,
+  ) {
+    dynamic rows = responseData;
     if (responseData is Map) {
-      if (responseData['data'] is List) {
-        return responseData['data'] as List;
+      if (responseData.containsKey('success') &&
+          responseData['success'] != true) {
+        throw LobeHubException(
+          'Unsuccessful $collectionKey response',
+          responseBody: responseData,
+        );
       }
-      if (responseData['items'] is List) {
-        return responseData['items'] as List;
-      }
-      if (responseData['list'] is List) {
-        return responseData['list'] as List;
-      }
-      if (responseData['topics'] is List) {
-        return responseData['topics'] as List;
-      }
-      if (responseData['agents'] is List) {
-        return responseData['agents'] as List;
-      }
-      if (responseData['messages'] is List) {
-        return responseData['messages'] as List;
+      if (responseData.containsKey('data')) {
+        final data = responseData['data'];
+        rows = data is Map ? data[collectionKey] : data;
+      } else if (responseData.containsKey('items')) {
+        rows = responseData['items'];
+      } else if (responseData.containsKey('list')) {
+        rows = responseData['list'];
+      } else {
+        rows = responseData[collectionKey];
       }
     }
-    return const [];
+    if (rows is! List) {
+      throw LobeHubException(
+        'Invalid $collectionKey collection envelope',
+        responseBody: responseData,
+      );
+    }
+    return rows.map((item) {
+      if (item is! Map<String, dynamic> ||
+          item['id'] == null ||
+          item['id'].toString().trim().isEmpty) {
+        throw LobeHubException(
+          'Invalid row in $collectionKey collection',
+          responseBody: responseData,
+        );
+      }
+      return item;
+    }).toList();
   }
 
   static LobeHealthResponse _parseHealthResponse(dynamic data) {

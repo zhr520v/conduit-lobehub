@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
@@ -70,6 +71,177 @@ ResponseBody jsonResponse(
 }
 
 void main() {
+  group('Collection decoding', () {
+    final loaders = <String, Future<List<dynamic>> Function(LobeHubApiClient)>{
+      'agents': (client) => client.getAgents(),
+      'topics': (client) => client.getTopics(),
+      'messages': (client) => client.getMessages(),
+    };
+    final fixtures = <String, List<Map<String, dynamic>>>{
+      'agents': List.generate(11, (index) => {
+        'id': 'synthetic_agent_$index',
+        'title': 'Synthetic Assistant $index',
+        'model': 'synthetic-model-$index',
+        'provider': 'synthetic-provider',
+        'params': {'temperature': 0.5},
+      }),
+      'topics': [
+        {'id': 'synthetic_topic', 'title': 'Synthetic Topic',
+          'agentId': 'synthetic_agent_0', 'favorite': true},
+      ],
+      'messages': [
+        {'id': 'synthetic_message', 'role': 'assistant',
+          'content': 'Synthetic reply', 'topicId': 'synthetic_topic',
+          'model': 'synthetic-model-0', 'provider': 'synthetic-provider'},
+      ],
+    };
+
+    for (final entry in loaders.entries) {
+      final key = entry.key;
+      final load = entry.value;
+      final rows = fixtures[key]!;
+      final unrelatedKey = key == 'agents' ? 'topics' : 'agents';
+
+      test('$key decodes nested success envelope with total', () async {
+        final (client, adapter) = createTestClient(handler: (options) =>
+          jsonResponse({'success': true, 'data': {key: rows, 'total': rows.length}}));
+        addTearDown(client.close);
+        final result = await load(client);
+        expect(result.map((dynamic row) => row.id), rows.map((row) => row['id']));
+        expect(adapter.requests.single.path, '/api/v1/$key');
+        if (key == 'agents') {
+          expect(result, hasLength(11));
+          for (var index = 0; index < 11; index++) {
+            final agent = result[index] as LobeAgent;
+            expect(agent.title, rows[index]['title']);
+            expect(agent.model, rows[index]['model']);
+            expect(agent.provider, rows[index]['provider']);
+            expect(agent.params, rows[index]['params']);
+          }
+        } else if (key == 'topics') {
+          final topic = result.single as LobeTopic;
+          expect(topic.title, 'Synthetic Topic');
+          expect(topic.agentId, 'synthetic_agent_0');
+          expect(topic.favorite, isTrue);
+        } else {
+          final message = result.single as LobeMessage;
+          expect(message.content, 'Synthetic reply');
+          expect(message.role, 'assistant');
+          expect(message.topicId, 'synthetic_topic');
+          expect(message.model, 'synthetic-model-0');
+          expect(message.provider, 'synthetic-provider');
+        }
+      });
+
+      test('$key preserves shipped list shapes', () async {
+        for (final body in <dynamic>[
+          rows, {'data': rows}, {'items': rows}, {'list': rows}, {key: rows},
+        ]) {
+          final (client, _) = createTestClient(handler: (_) => jsonResponse(body));
+          addTearDown(client.close);
+          expect(await load(client), hasLength(rows.length));
+        }
+      });
+
+      test('$key accepts valid empty collections', () async {
+        for (final body in <dynamic>[
+          [], {'data': []}, {'items': []}, {'list': []}, {key: []},
+          {'success': true, 'data': {key: [], 'total': 0}},
+        ]) {
+          final (client, _) = createTestClient(handler: (_) => jsonResponse(body));
+          addTearDown(client.close);
+          expect(await load(client), isEmpty);
+        }
+      });
+
+      test('$key rejects malformed or unrelated collection envelopes', () async {
+        for (final body in <dynamic>[
+          null, 'invalid', 42, {}, {'success': true}, {'data': null},
+          {'data': {}}, {'data': {key: {}}}, {key: 'invalid'},
+          {unrelatedKey: rows}, {'data': {unrelatedKey: rows}},
+          {'data': {key: null}, 'items': rows},
+          {'success': 'true', 'data': rows},
+        ]) {
+          final (client, _) = createTestClient(handler: (_) => jsonResponse(body));
+          addTearDown(client.close);
+          await expectLater(load(client), throwsA(isA<LobeHubException>()),
+            reason: 'Malformed $key envelope: $body');
+        }
+      });
+
+      test('$key rejects malformed rows rather than dropping them', () async {
+        for (final badRow in <dynamic>[null, 42, 'invalid', [], {},
+          {'id': null}, {'id': ''}]) {
+          for (final body in <dynamic>[
+            [rows.first, badRow],
+            {'data': [badRow]},
+            {'success': true, 'data': {key: [rows.first, badRow], 'total': 2}},
+          ]) {
+            final (client, _) = createTestClient(handler: (_) => jsonResponse(body));
+            addTearDown(client.close);
+            await expectLater(load(client), throwsA(isA<LobeHubException>()),
+              reason: 'Malformed $key row: $badRow');
+          }
+        }
+      });
+
+      test('$key rejects success false even with a valid collection', () async {
+        for (final body in <dynamic>[
+          {'success': false, 'error': {'message': 'Synthetic failure'}},
+          {'success': false, 'data': []},
+          {'success': false, 'data': rows},
+          {'success': false, key: rows},
+          {'success': false, 'data': {key: rows, 'total': rows.length}},
+        ]) {
+          final (client, _) = createTestClient(handler: (_) => jsonResponse(body));
+          addTearDown(client.close);
+          await expectLater(load(client), throwsA(isA<LobeHubException>()
+            .having((error) => error.responseBody, 'responseBody', body)));
+        }
+      });
+    }
+
+    test('public collection APIs decode over credential-free loopback HTTP', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      var success = true;
+      final subscription = server.listen((request) {
+        final key = request.uri.pathSegments.last;
+        request.response.headers.contentType = ContentType.json;
+        request.response.write(jsonEncode({
+          'success': success,
+          'data': {key: fixtures[key], 'total': fixtures[key]!.length},
+        }));
+        unawaited(request.response.close());
+      });
+      addTearDown(subscription.cancel);
+      final client = LobeHubApiClient(
+        baseUrl: 'http://127.0.0.1:${server.port}',
+      );
+      addTearDown(client.close);
+      for (final entry in loaders.entries) {
+        expect(await entry.value(client), hasLength(fixtures[entry.key]!.length));
+      }
+      success = false;
+      for (final load in loaders.values) {
+        await expectLater(load(client), throwsA(isA<LobeHubException>()));
+      }
+    });
+
+    test('getAgent preserves flat fields inside success detail envelope', () async {
+      final row = fixtures['agents']!.first;
+      final (client, _) = createTestClient(handler: (_) =>
+        jsonResponse({'success': true, 'data': row}));
+      addTearDown(client.close);
+      final agent = await client.getAgent(row['id'] as String);
+      expect(agent.id, row['id']);
+      expect(agent.title, row['title']);
+      expect(agent.model, row['model']);
+      expect(agent.provider, row['provider']);
+      expect(agent.params, row['params']);
+    });
+  });
+
   group('Base URL normalization', () {
     test('normalizes root URL with no trailing slash', () {
       expect(
